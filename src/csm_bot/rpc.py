@@ -32,6 +32,9 @@ from csm_bot.models import (
 logger = logging.getLogger(__name__)
 logging.getLogger("web3.providers.persistent.subscription_manager").setLevel(logging.WARNING)
 
+BACKFILL_GET_LOGS_RETRY_INITIAL_DELAY_SECONDS = 2.0
+BACKFILL_GET_LOGS_RETRY_MAX_DELAY_SECONDS = 60.0
+
 
 def topics_to_follow(allowed_events: set[str], *abis) -> dict:
     topics = {}
@@ -228,9 +231,16 @@ class Subscription:
                     toBlock=batch_end,
                     address=contract,
                 )
-                await self._throttle_process_blocks_request()
                 try:
-                    logs = await w3.eth.get_logs(filter_params)
+                    logs = await self._get_logs_with_retry(
+                        w3=w3,
+                        filter_params=filter_params,
+                        contract=contract,
+                        batch_start=batch_start,
+                        batch_end=batch_end,
+                    )
+                    if logs is None:
+                        break
                 except web3.exceptions.Web3Exception as e:
                     logger.error("Error fetching logs: %s", e)
                     self._shutdown_event.set()
@@ -262,6 +272,77 @@ class Subscription:
             logger.warning("Backfill interrupted before reaching block %s", end_block)
             return
         logger.info("Backfill complete at block %s", end_block)
+
+    @staticmethod
+    def _is_retryable_get_logs_error(exc: web3.exceptions.Web3Exception) -> bool:
+        if not isinstance(exc, web3.exceptions.Web3RPCError):
+            return False
+
+        code: int | None = None
+        message = str(exc).lower()
+
+        rpc_error = exc.rpc_response.get("error") if isinstance(exc.rpc_response, dict) else None
+        if isinstance(rpc_error, dict):
+            maybe_code = rpc_error.get("code")
+            if isinstance(maybe_code, int):
+                code = maybe_code
+            rpc_message = rpc_error.get("message")
+            if isinstance(rpc_message, str):
+                message = f"{message} {rpc_message.lower()}"
+
+        if code in {429, -32005}:
+            return True
+
+        return any(
+            marker in message
+            for marker in (
+                "429",
+                "rate limit",
+                "too many requests",
+                "throughput",
+                "compute units per second",
+            )
+        )
+
+    async def _get_logs_with_retry(
+        self,
+        *,
+        w3: AsyncWeb3,
+        filter_params: FilterParams,
+        contract: str,
+        batch_start: int,
+        batch_end: int,
+    ) -> list[Any] | None:
+        attempt = 1
+        delay_seconds = BACKFILL_GET_LOGS_RETRY_INITIAL_DELAY_SECONDS
+
+        while True:
+            if self._shutdown_event.is_set():
+                return None
+
+            await self._throttle_process_blocks_request()
+            try:
+                return await w3.eth.get_logs(filter_params)
+            except web3.exceptions.Web3Exception as exc:
+                if not self._is_retryable_get_logs_error(exc):
+                    raise
+
+                logger.warning(
+                    "Rate-limited while fetching logs for %s blocks %s-%s (attempt %s). "
+                    "Retrying in %.1fs. Error: %s",
+                    contract,
+                    batch_start,
+                    batch_end,
+                    attempt,
+                    delay_seconds,
+                    exc,
+                )
+                await asyncio.sleep(delay_seconds)
+                attempt += 1
+                delay_seconds = min(
+                    delay_seconds * 2,
+                    BACKFILL_GET_LOGS_RETRY_MAX_DELAY_SECONDS,
+                )
 
     async def _throttle_process_blocks_request(self):
         if self._process_blocks_request_interval is None:
