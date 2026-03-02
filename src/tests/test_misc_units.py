@@ -6,6 +6,8 @@ from unittest.mock import patch
 
 from hexbytes import HexBytes
 import pytest
+import web3.exceptions
+from web3.types import FilterParams
 
 from csm_bot.config import clear_config
 
@@ -175,3 +177,102 @@ async def test_get_block_number_uses_persistent_provider():
     assert latest == 111
     main_w3.eth.get_block_number.assert_awaited_once()
     backfill_w3.eth.get_block_number.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@patch.dict(
+    os.environ,
+    {
+        "WEB3_SOCKET_PROVIDER": "wss://example.invalid",
+        "CSM_ADDRESS": "0x0000000000000000000000000000000000000001",
+    },
+    clear=True,
+)
+async def test_get_logs_with_retry_recovers_from_rate_limit(
+    monkeypatch,
+    stub_discover_contract_addresses,
+):
+    from csm_bot.config import get_config_async
+    from csm_bot.rpc import Subscription
+    from csm_bot.texts import EVENT_DESCRIPTIONS
+
+    class DummyW3:
+        provider = None
+
+    clear_config()
+    await get_config_async()
+
+    subscription = Subscription(DummyW3(), set(EVENT_DESCRIPTIONS.keys()))
+    rate_limit_error = web3.exceptions.Web3RPCError(
+        message="{'code': 429, 'message': 'throughput exceeded'}",
+        rpc_response={"error": {"code": 429, "message": "throughput exceeded"}},
+    )
+    rpc_w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_logs=AsyncMock(side_effect=[rate_limit_error, []]),
+        ),
+    )
+    monkeypatch.setattr("csm_bot.rpc.BACKFILL_GET_LOGS_RETRY_INITIAL_DELAY_SECONDS", 0)
+    monkeypatch.setattr("csm_bot.rpc.BACKFILL_GET_LOGS_RETRY_MAX_DELAY_SECONDS", 0)
+
+    logs = await subscription._get_logs_with_retry(
+        w3=rpc_w3,
+        filter_params=FilterParams(fromBlock=1, toBlock=1, address="0x1"),
+        contract="0x1",
+        batch_start=1,
+        batch_end=1,
+    )
+
+    assert logs == []
+    assert rpc_w3.eth.get_logs.await_count == 2
+    assert subscription._shutdown_event.is_set() is False
+    clear_config()
+
+
+@pytest.mark.asyncio
+@patch.dict(
+    os.environ,
+    {
+        "WEB3_SOCKET_PROVIDER": "wss://example.invalid",
+        "CSM_ADDRESS": "0x0000000000000000000000000000000000000001",
+    },
+    clear=True,
+)
+async def test_get_logs_with_retry_raises_non_retryable_errors(
+    monkeypatch,
+    stub_discover_contract_addresses,
+):
+    from csm_bot.config import get_config_async
+    from csm_bot.rpc import Subscription
+    from csm_bot.texts import EVENT_DESCRIPTIONS
+
+    class DummyW3:
+        provider = None
+
+    clear_config()
+    await get_config_async()
+
+    subscription = Subscription(DummyW3(), set(EVENT_DESCRIPTIONS.keys()))
+    fatal_error = web3.exceptions.Web3RPCError(
+        message="execution reverted",
+        rpc_response={"error": {"code": 3, "message": "execution reverted"}},
+    )
+    rpc_w3 = SimpleNamespace(
+        eth=SimpleNamespace(
+            get_logs=AsyncMock(side_effect=fatal_error),
+        ),
+    )
+    monkeypatch.setattr("csm_bot.rpc.BACKFILL_GET_LOGS_RETRY_INITIAL_DELAY_SECONDS", 0)
+    monkeypatch.setattr("csm_bot.rpc.BACKFILL_GET_LOGS_RETRY_MAX_DELAY_SECONDS", 0)
+
+    with pytest.raises(web3.exceptions.Web3RPCError):
+        await subscription._get_logs_with_retry(
+            w3=rpc_w3,
+            filter_params=FilterParams(fromBlock=1, toBlock=1, address="0x1"),
+            contract="0x1",
+            batch_start=1,
+            batch_end=1,
+        )
+
+    assert rpc_w3.eth.get_logs.await_count == 1
+    clear_config()
