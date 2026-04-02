@@ -18,21 +18,22 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
 
     steps:
       - name: Resolve release state
         id: state
         run: |
           previous_release_tag="$(
-            gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName // ""'
+            gh release list --repo "$GH_REPO" --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName // ""'
           )"
           previous_release_version="${previous_release_tag#v}"
           managed_draft_tag="$(
-            gh release list --limit 100 --json tagName,name,isDraft,isPrerelease \
+            gh release list --repo "$GH_REPO" --limit 100 --json tagName,name,isDraft,isPrerelease \
               --jq '.[] | select(.isDraft and .isPrerelease and (.name | startswith("Release candidate "))) | .tagName' \
               | head -n1
           )"
-          gh release list --limit 100 --exclude-drafts --json tagName,isPrerelease \
+          gh release list --repo "$GH_REPO" --limit 100 --exclude-drafts --json tagName,isPrerelease \
             --jq '.[] | select(.isPrerelease) | .tagName' > "$RUNNER_TEMP/prerelease-tags.txt"
           echo "previous_release_tag=${previous_release_tag}" >> "$GITHUB_OUTPUT"
           echo "previous_release_version=${previous_release_version:-0.0.0}" >> "$GITHUB_OUTPUT"
@@ -108,7 +109,7 @@ jobs:
           MERGED_PR_URL: ${{ github.event.pull_request.html_url }}
           MERGED_PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          [ -z "$MANAGED_DRAFT_TAG" ] || gh release delete "$MANAGED_DRAFT_TAG" --yes --cleanup-tag
+          [ -z "$MANAGED_DRAFT_TAG" ] || gh release delete "$MANAGED_DRAFT_TAG" --repo "$GH_REPO" --yes --cleanup-tag
 
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           Suggested bump: \`$SUGGESTED_BUMP\`
@@ -131,7 +132,7 @@ jobs:
             --generate-notes
           )
           [ -z "$PREVIOUS_RELEASE_TAG" ] || args+=(--notes-start-tag "$PREVIOUS_RELEASE_TAG")
-          gh release create "${args[@]}"
+          gh release create --repo "$GH_REPO" "${args[@]}"
 
           {
             echo "Prepared draft prerelease \`$SUGGESTED_TAG\`."
