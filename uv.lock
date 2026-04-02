@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -447,47 +447,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
-]
-
-[[package]]
-name = "csm-bot"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "aiogram" },
-    { name = "async-lru" },
-    { name = "pytest-asyncio" },
-    { name = "python-dotenv" },
-    { name = "python-telegram-bot", extra = ["job-queue", "rate-limiter"] },
-    { name = "tqdm" },
-    { name = "web3" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-xdist" },
-    { name = "ruff" },
-    { name = "ty" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiogram", specifier = ">=3.12.0" },
-    { name = "async-lru", specifier = ">=2.0.5" },
-    { name = "pytest-asyncio", specifier = ">=1.1.0" },
-    { name = "python-dotenv" },
-    { name = "python-telegram-bot", extras = ["rate-limiter", "job-queue"], specifier = ">=21.4" },
-    { name = "tqdm", specifier = ">=4.66.5" },
-    { name = "web3", specifier = ">=7.12.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.3.4" },
-    { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "ruff", specifier = ">=0.15.0" },
-    { name = "ty", specifier = ">=0.0.15" },
 ]
 
 [[package]]
@@ -1589,6 +1548,46 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/23/01/1c30526460f4d23222d0fabd5888868262fd0e2b71a00570ca26483cd993/ruff-0.15.2-py3-none-win32.whl", hash = "sha256:fd5ff9e5f519a7e1bd99cbe8daa324010a74f5e2ebc97c6242c08f26f3714f6f", size = 10507885, upload-time = "2026-02-19T22:32:15.635Z" },
     { url = "https://files.pythonhosted.org/packages/5c/10/3d18e3bbdf8fc50bbb4ac3cc45970aa5a9753c5cb51bf9ed9a3cd8b79fa3/ruff-0.15.2-py3-none-win_amd64.whl", hash = "sha256:d20014e3dfa400f3ff84830dfb5755ece2de45ab62ecea4af6b7262d0fb4f7c5", size = 11623725, upload-time = "2026-02-19T22:32:04.947Z" },
     { url = "https://files.pythonhosted.org/packages/6d/78/097c0798b1dab9f8affe73da9642bb4500e098cb27fd8dc9724816ac747b/ruff-0.15.2-py3-none-win_arm64.whl", hash = "sha256:cabddc5822acdc8f7b5527b36ceac55cc51eec7b1946e60181de8fe83ca8876e", size = 10941649, upload-time = "2026-02-19T22:32:18.108Z" },
+]
+
+[[package]]
+name = "sentinel"
+source = { virtual = "." }
+dependencies = [
+    { name = "aiogram" },
+    { name = "async-lru" },
+    { name = "pytest-asyncio" },
+    { name = "python-dotenv" },
+    { name = "python-telegram-bot", extra = ["job-queue", "rate-limiter"] },
+    { name = "tqdm" },
+    { name = "web3" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-xdist" },
+    { name = "ruff" },
+    { name = "ty" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiogram", specifier = ">=3.12.0" },
+    { name = "async-lru", specifier = ">=2.0.5" },
+    { name = "pytest-asyncio", specifier = ">=1.1.0" },
+    { name = "python-dotenv" },
+    { name = "python-telegram-bot", extras = ["job-queue", "rate-limiter"], specifier = ">=21.4" },
+    { name = "tqdm", specifier = ">=4.66.5" },
+    { name = "web3", specifier = ">=7.12.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3.4" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.15.0" },
+    { name = "ty", specifier = ">=0.0.15" },
 ]
 
 [[package]]

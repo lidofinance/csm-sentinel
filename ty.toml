@@ -1,5 +1,5 @@
 [src]
-include = ["src/csm_bot"]
+include = ["src/sentinel"]
 
 [environment]
 python-version = "3.11"
