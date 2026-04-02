@@ -41,6 +41,38 @@ docker volume create csm-sentinel-persistent
 docker run -d --env-file=.env --name csm-sentinel -v csm-sentinel-persistent:/app/.storage csm-sentinel
 ```
 
+## Container images
+
+Public container images are published to GitHub Container Registry for this repository:
+
+```bash
+docker pull ghcr.io/skhomuti/csm-sentinel:latest
+```
+
+Image tags follow the Git ref that triggered the workflow:
+
+- Pull requests build the image for validation but do not publish it
+- Each merge to `main` refreshes a draft prerelease suggestion in GitHub Releases
+- Publishing a prerelease with tag `vX.Y.ZrcN` publishes `ghcr.io/skhomuti/csm-sentinel:X.Y.ZrcN`
+- Publishing a stable release with tag `vX.Y.Z` publishes `ghcr.io/skhomuti/csm-sentinel:X.Y.Z`, `X.Y`, `X`, and `latest`
+
+Suggested prerelease bumps are driven by pull request labels:
+
+- `release:major` for breaking changes
+- `release:minor` for backward-compatible features
+- `release:patch` for fixes and other release-worthy changes
+
+If no `release:*` label is applied, the next draft prerelease treats the change as a patch.
+
+## Local development
+
+Install dependencies and run the bot with `uv`:
+
+```bash
+uv sync
+uv run python -m sentinel.main
+```
+
 ## Running alongside eth-docker
 If you are running the bot on the same machine as the [eth-docker](https://github.com/eth-educators/eth-docker), 
 you can use the execution client with no need to expose it outside the container.
@@ -96,7 +128,7 @@ Admins can broadcast messages via the in-bot Admin panel:
 
 ## Integration test suite
 
-End-to-end verification for on-chain events lives under `src/tests/integration`. Each
+End-to-end verification for on-chain events lives under `tests/integration`. Each
 scenario replays a real transaction through a lightweight harness that exposes the
 same `process_blocks_from` and `subscribe` entrypoints as the real subscription, allowing
 `EventMessages` to render the expected Markdown for every event.

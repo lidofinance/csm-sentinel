@@ -1,9 +1,16 @@
 FROM python:3.12-slim-bookworm
-COPY --from=ghcr.io/astral-sh/uv:0.4.9 /uv /bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.9.21 /uv /uvx /bin/
 
-ADD . /app
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_DEV=1 \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
-RUN uv sync --frozen
 
-CMD [".venv/bin/python", "src/csm_bot/main.py"]
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked
+
+COPY . /app
+
+CMD ["python", "-m", "sentinel.main"]

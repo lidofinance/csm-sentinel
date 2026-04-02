@@ -1,0 +1,142 @@
+name: Prepare Draft Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prepare-release-main
+  cancel-in-progress: true
+
+jobs:
+  prepare-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Resolve release state
+        id: state
+        run: |
+          previous_release_tag="$(
+            gh release list --limit 1 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[0].tagName // ""'
+          )"
+          previous_release_version="${previous_release_tag#v}"
+          managed_draft_tag="$(
+            gh release list --limit 100 --json tagName,name,isDraft,isPrerelease \
+              --jq '.[] | select(.isDraft and .isPrerelease and (.name | startswith("Release candidate "))) | .tagName' \
+              | head -n1
+          )"
+          gh release list --limit 100 --exclude-drafts --json tagName,isPrerelease \
+            --jq '.[] | select(.isPrerelease) | .tagName' > "$RUNNER_TEMP/prerelease-tags.txt"
+          echo "previous_release_tag=${previous_release_tag}" >> "$GITHUB_OUTPUT"
+          echo "previous_release_version=${previous_release_version:-0.0.0}" >> "$GITHUB_OUTPUT"
+          echo "managed_draft_tag=${managed_draft_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Classify merged pull request
+        id: pr
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          case " $PR_LABELS " in
+            *" release:major "*) echo "bump=major" >> "$GITHUB_OUTPUT" ;;
+            *" release:minor "*) echo "bump=minor" >> "$GITHUB_OUTPUT" ;;
+            *) echo "bump=patch" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Suggest prerelease tag
+        id: suggestion
+        env:
+          PREVIOUS_RELEASE_VERSION: ${{ steps.state.outputs.previous_release_version }}
+          PR_BUMP: ${{ steps.pr.outputs.bump }}
+          MANAGED_DRAFT_TAG: ${{ steps.state.outputs.managed_draft_tag }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from packaging.version import Version
+
+          previous = Version(os.environ["PREVIOUS_RELEASE_VERSION"])
+          pr_bump = os.environ["PR_BUMP"]
+          managed_draft_tag = os.environ.get("MANAGED_DRAFT_TAG", "")
+
+          target = {
+              "patch": Version(f"{previous.major}.{previous.minor}.{previous.micro + 1}"),
+              "minor": Version(f"{previous.major}.{previous.minor + 1}.0"),
+              "major": Version(f"{previous.major + 1}.0.0"),
+          }[pr_bump]
+
+          if managed_draft_tag:
+              draft = Version(managed_draft_tag.removeprefix("v"))
+              target = max(target, Version(draft.base_version))
+
+          current = max(
+            (
+              version.pre[1]
+              for tag in open(os.path.join(os.environ["RUNNER_TEMP"], "prerelease-tags.txt"), encoding="utf-8")
+              if tag.strip()
+              for version in [Version(tag.strip().removeprefix("v"))]
+              if version.pre and version.pre[0] == "rc" and version.base_version == target.base_version
+            ),
+            default=0,
+          )
+
+          effective_bump = (
+              "major" if target.major > previous.major else
+              "minor" if target.minor > previous.minor else
+              "patch"
+          )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+            fh.write(f"bump={effective_bump}\n")
+            fh.write(f"tag=v{target.base_version}rc{current + 1}\n")
+          PY
+
+      - name: Create draft prerelease
+        env:
+          PREVIOUS_RELEASE_TAG: ${{ steps.state.outputs.previous_release_tag }}
+          PR_BUMP: ${{ steps.pr.outputs.bump }}
+          SUGGESTED_BUMP: ${{ steps.suggestion.outputs.bump }}
+          SUGGESTED_TAG: ${{ steps.suggestion.outputs.tag }}
+          MANAGED_DRAFT_TAG: ${{ steps.state.outputs.managed_draft_tag }}
+          TARGET_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGED_PR_NUMBER: ${{ github.event.pull_request.number }}
+          MERGED_PR_URL: ${{ github.event.pull_request.html_url }}
+          MERGED_PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          [ -z "$MANAGED_DRAFT_TAG" ] || gh release delete "$MANAGED_DRAFT_TAG" --yes --cleanup-tag
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Suggested bump: \`$SUGGESTED_BUMP\`
+
+          Previous stable release: \`${PREVIOUS_RELEASE_TAG:-v0.0.0}\`
+
+          Merged pull request:
+
+          - [#$MERGED_PR_NUMBER]($MERGED_PR_URL) $MERGED_PR_TITLE
+          - classified as \`$PR_BUMP\` from PR labels
+          EOF
+
+          args=(
+            "$SUGGESTED_TAG"
+            --draft
+            --prerelease
+            --target "$TARGET_SHA"
+            --title "Release candidate $SUGGESTED_TAG"
+            --notes-file "$RUNNER_TEMP/release-notes.md"
+            --generate-notes
+          )
+          [ -z "$PREVIOUS_RELEASE_TAG" ] || args+=(--notes-start-tag "$PREVIOUS_RELEASE_TAG")
+          gh release create "${args[@]}"
+
+          {
+            echo "Prepared draft prerelease \`$SUGGESTED_TAG\`."
+            echo
+            echo "Suggested bump: \`$SUGGESTED_BUMP\`"
+            echo
+            echo "Review and adjust the draft release in GitHub before publishing it."
+          } >> "$GITHUB_STEP_SUMMARY"
