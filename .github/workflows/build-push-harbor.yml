@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       publish_dev:
-        description: Publish the image with the dev tag instead of the source release tag
+        description: Also publish the image with the dev tag alongside the source release tag
         required: false
         default: false
         type: boolean
