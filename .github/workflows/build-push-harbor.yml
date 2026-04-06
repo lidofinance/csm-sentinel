@@ -7,6 +7,11 @@ on:
         description: Upstream release tag to build from
         required: true
         type: string
+      publish_dev:
+        description: Publish the image with the dev tag instead of the source release tag
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -19,19 +24,35 @@ env:
   SOURCE_REPOSITORY: skhomuti/csm-sentinel
 
 concurrency:
-  group: harbor-publish-${{ github.event.inputs.tag }}
+  group: harbor-publish
   cancel-in-progress: true
 
 jobs:
   build-and-push:
     runs-on: ubuntu-22.04
     steps:
-      - name: Resolve image tag
+      - name: Resolve image tags
         id: target
         env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.APP }}
           SOURCE_TAG: ${{ github.event.inputs.tag }}
+          PUBLISH_DEV: ${{ github.event.inputs.publish_dev }}
         run: |
-          echo "image_tag=${SOURCE_TAG#v}" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os
+
+          image = os.environ["IMAGE"]
+          source_tag = os.environ["SOURCE_TAG"].removeprefix("v")
+          publish_tags = [source_tag]
+
+          if os.environ.get("PUBLISH_DEV") == "true":
+              publish_tags.append("dev")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("image_tags<<EOF\n")
+              fh.write("\n".join(f"{image}:{tag}" for tag in publish_tags))
+              fh.write("\nEOF\n")
+          PY
 
       - name: Checkout upstream source
         uses: actions/checkout@v4
@@ -56,6 +77,6 @@ jobs:
           context: .
           builder: ${{ steps.buildx.outputs.name }}
           push: true
-          tags: ${{ env.REGISTRY }}/${{ env.REPOSITORY }}/${{ env.APP }}:${{ steps.target.outputs.image_tag }}
+          tags: ${{ steps.target.outputs.image_tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
