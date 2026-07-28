@@ -1,12 +1,11 @@
 import logging
 import json
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
 from eth_typing import ChecksumAddress
 import web3.exceptions
-from web3 import WebSocketProvider, AsyncWeb3, AsyncHTTPProvider
+from web3 import AsyncWeb3, WebSocketProvider
 
 from sentinel.module_types import ModuleType, decode_module_type
 
@@ -251,18 +250,6 @@ async def discover_contract_addresses(w3: AsyncWeb3, module_address: str) -> Con
     return addresses
 
 
-async def discover_contract_addresses_from_url(
-    provider_url: str, module_address: str
-) -> ContractAddresses:
-    w3 = await _build_web3(provider_url)
-    try:
-        return await discover_contract_addresses(w3, module_address)
-    finally:
-        if hasattr(w3.provider, "disconnect"):
-            with suppress(Exception):
-                await w3.provider.disconnect()
-
-
 def _ensure_address(raw_address: str, source: str) -> str:
     if not raw_address or raw_address == ZERO_ADDRESS:
         raise RuntimeError(f"Failed to discover address from {source}")
@@ -298,11 +285,3 @@ def _find_staking_module_id(modules: list[tuple], module_address: str) -> int | 
 def log_discovered_addresses(addresses: ContractAddresses) -> None:
     printable = json.dumps(addresses.as_dict(), indent=2, sort_keys=True)
     logger.info("Discovered contract addresses:\n%s", printable)
-
-
-async def _build_web3(provider_url: str) -> AsyncWeb3:
-    if provider_url.startswith(("ws://", "wss://")):
-        provider = WebSocketProvider(provider_url, max_connection_retries=-1)
-    else:
-        provider = AsyncHTTPProvider(provider_url)
-    return AsyncWeb3(provider)

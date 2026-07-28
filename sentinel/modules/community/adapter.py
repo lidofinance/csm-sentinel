@@ -9,7 +9,7 @@ from sentinel.app.contracts import (
     CommunityContractAddresses,
     CommunityContractABIs,
 )
-from sentinel.chain import ConnectOnDemand
+from sentinel.chain import SharedChainConnection
 from sentinel.module_types import ModuleType
 from sentinel.modules.base import BaseModuleAdapter, EventSource
 from sentinel.modules.community.texts import CommunityTexts
@@ -102,7 +102,7 @@ class CommunityModuleAdapter(BaseModuleAdapter):
         contracts: CommunityModuleContracts,
         module_ui_url: str | None,
         contract_abis: CommunityContractABIs,
-        chain: ConnectOnDemand,
+        chain: SharedChainConnection,
     ) -> None:
         if addresses.module_type != ModuleType.COMMUNITY:
             raise RuntimeError(f"Expected community module, got {addresses.module_type!s}")

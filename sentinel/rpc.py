@@ -1,15 +1,13 @@
 import asyncio
 import logging
-import os
+from contextlib import suppress
 from typing import Any, Protocol, cast
 
-import web3.exceptions
 from web3 import AsyncWeb3, WebSocketProvider
 from web3.utils.subscriptions import (
     LogsSubscription,
     LogsSubscriptionContext,
 )
-from websockets import ConnectionClosed
 
 from sentinel.app.health import HealthState
 from sentinel.config import Config, get_config
@@ -18,6 +16,10 @@ from sentinel.models import (
     Block,
 )
 from sentinel.modules.base import ModuleAdapter
+from sentinel.rpc_provider import (
+    RpcAvailabilityError,
+    RpcSubscriptionReconnectRequired,
+)
 from sentinel.web3_events import build_event_bindings, decode_event, log_filter_for_source
 from sentinel.web3_event_log_reader import Web3EventLogReader
 
@@ -83,7 +85,7 @@ class Subscription:
         if consumer in self._block_consumers:
             self._block_consumers.remove(consumer)
 
-    async def wait_until_subscribed(self, *, timeout: float = 10.0) -> None:
+    async def wait_until_subscribed(self, *, timeout: float | None = 10.0) -> None:
         """Wait until subscriptions are established (or raise on timeout)."""
 
         await asyncio.wait_for(self._subscriptions_started.wait(), timeout=timeout)
@@ -104,20 +106,6 @@ class Subscription:
             logger.info("Web3 provider connected")
         return self._w3
 
-    @staticmethod
-    def reconnect(func):
-        async def wrapper(self, *args, **kwargs):
-            while True:
-                try:
-                    return await func(self, *args, **kwargs)
-                except ConnectionClosed:
-                    self._health.mark_subscription_inactive()
-                    if self._shutdown_event.is_set():
-                        break
-                    logger.info("Web3 provider disconnected, reconnecting...")
-
-        return wrapper
-
     async def shutdown(self):
         await self._shutdown_event.wait()
 
@@ -129,31 +117,50 @@ class Subscription:
     async def stop(self) -> None:
         """Request shutdown and detach active Web3 subscriptions."""
 
+        await self._stop(unsubscribe=True)
+
+    async def abort(self) -> None:
+        """Stop a broken subscription without using its stale subscription IDs."""
+
+        await self._stop(unsubscribe=False)
+
+    async def _stop(self, *, unsubscribe: bool) -> None:
+        """Stop this subscription and disconnect its persistent provider."""
+
         self.request_shutdown()
         async with self._stop_lock:
             if not self._subscriptions_detached:
-                try:
-                    await self._w3.subscription_manager.unsubscribe_all()
-                except ValueError as exc:
-                    if "list.remove" not in str(exc):
-                        raise
-                    logger.debug("Web3 subscriptions were already detached", exc_info=True)
-                except (ConnectionClosed, AttributeError):
-                    pass
+                if unsubscribe:
+                    try:
+                        await self._w3.subscription_manager.unsubscribe_all()
+                    except RpcAvailabilityError:
+                        pass
                 self._subscriptions_detached = True
+        if hasattr(self._w3.provider, "disconnect"):
+            with suppress(RpcAvailabilityError):
+                await self._w3.provider.disconnect()
         self._health.mark_subscription_inactive()
 
-    @reconnect
     async def subscribe(self):
         if self._shutdown_event.is_set():
             return
-        w3 = await self._connected_w3()
-        await w3.subscription_manager.subscribe(self._build_log_subscriptions())
-        logger.info("Subscriptions started")
-        self._subscriptions_started.set()
-        self._health.mark_subscription_active()
+        try:
+            w3 = await self._connected_w3()
+            await w3.subscription_manager.subscribe(self._build_log_subscriptions())
+            logger.info("Subscriptions started")
+            self._subscriptions_started.set()
+            self._health.mark_subscription_active()
 
-        await w3.subscription_manager.handle_subscriptions()
+            await w3.subscription_manager.handle_subscriptions()
+        except RpcAvailabilityError:
+            self._health.mark_subscription_inactive()
+            if self._shutdown_event.is_set():
+                return
+            raise
+
+        if not self._shutdown_event.is_set():
+            self._health.mark_subscription_inactive()
+            raise RpcSubscriptionReconnectRequired.listener_stopped()
 
     async def replay_blocks(
         self,
@@ -181,6 +188,8 @@ class Subscription:
 
     async def _replay_blocks(self, start_block: int, end_block: int | None = None):
         w3 = await self._event_log_reader.connected_w3()
+        if w3 is None:
+            return
         end_block = end_block or await w3.eth.get_block_number()
         if start_block > end_block:
             logger.info("No blocks to process")
@@ -197,15 +206,10 @@ class Subscription:
                 len(self._event_sources),
             )
 
-            try:
-                events = await self._event_log_reader.fetch_events(
-                    start_block=batch_start,
-                    end_block=batch_end,
-                )
-            except web3.exceptions.Web3Exception as e:
-                logger.error("Error fetching logs: %s", e)
-                self._shutdown_event.set()
-                break
+            events = await self._event_log_reader.fetch_events(
+                start_block=batch_start,
+                end_block=batch_end,
+            )
 
             if events is None:
                 break
@@ -315,11 +319,15 @@ class LoggingConsumer:
 
 if __name__ == "__main__":
     from sentinel.app.module_adapter import build_module_adapter_from_config
-    from sentinel.chain import ConnectOnDemand
+    from sentinel.chain import SharedChainConnection
 
     cfg = get_config()
-    provider = AsyncWeb3(WebSocketProvider(os.getenv("WEB3_SOCKET_PROVIDER")))
-    module_adapter = build_module_adapter_from_config(cfg, provider, ConnectOnDemand(provider))
+    provider = AsyncWeb3(WebSocketProvider(cfg.web3_socket_providers[0]))
+    module_adapter = build_module_adapter_from_config(
+        cfg,
+        provider,
+        SharedChainConnection(provider),
+    )
 
     subscription = Subscription(
         provider,

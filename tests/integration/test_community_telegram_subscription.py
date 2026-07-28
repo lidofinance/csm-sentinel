@@ -16,12 +16,12 @@ COMMUNITY_HOODI_MODULE = "0x79CEf36D84743222f37765204Bec41E92a93E59d"
 def community_hoodi_config_env():
     """Point this suite at the Hoodi Community deployment used by the fixture blocks."""
 
-    provider_url = os.getenv("WEB3_SOCKET_PROVIDER")
+    provider_url = os.getenv("WEB3_SOCKET_PROVIDERS") or os.getenv("WEB3_SOCKET_PROVIDER")
     if not provider_url:
-        pytest.skip("WEB3_SOCKET_PROVIDER is required")
+        pytest.skip("WEB3_SOCKET_PROVIDERS or WEB3_SOCKET_PROVIDER is required")
 
     with pytest.MonkeyPatch.context() as m:
-        m.setenv("WEB3_SOCKET_PROVIDER", provider_url)
+        m.setenv("WEB3_SOCKET_PROVIDERS", provider_url)
         m.setenv("MODULE_ADDRESS", COMMUNITY_HOODI_MODULE)
         m.setenv("ETHERSCAN_URL", "https://etherscan.io")
         m.setenv("BEACONCHAIN_URL", "https://beaconcha.in")
@@ -55,7 +55,7 @@ async def _exercise_event(
             try:
                 await harness.wait_until_subscribed()
                 await replay_transaction_on_anvil(
-                    fork_provider_url=cfg.web3_socket_provider,
+                    fork_provider_url=cfg.web3_socket_providers[0],
                     anvil_http_url=anvil.http_url,
                     tx_hash=tx_hash,
                 )
@@ -129,7 +129,7 @@ async def test_process_live_initialized_v3_upgrade_rebuilds_runtime(anvil_launch
         await harness.wait_until_subscribed()
 
         await replay_transaction_on_anvil(
-            fork_provider_url=cfg.web3_socket_provider,
+            fork_provider_url=cfg.web3_socket_providers[0],
             anvil_http_url=anvil.http_url,
             tx_hash="0xcccb19dcb5e0695cb15ce08894d64cf4b304c794f20b48995855f4e8e48d50cb",
         )

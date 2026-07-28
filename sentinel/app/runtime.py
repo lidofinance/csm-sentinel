@@ -1,3 +1,4 @@
+from asyncio import Task
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -7,7 +8,7 @@ if TYPE_CHECKING:
     from sentinel.app.application import SentinelApplication
     from sentinel.app.health import HealthServer, HealthState
     from sentinel.app.telegram_adapters import TelegramNotificationHandler
-    from sentinel.chain import ConnectOnDemand
+    from sentinel.chain import SharedChainConnection
     from sentinel.jobs import JobContext
     from sentinel.modules.base import ModuleAdapter
     from sentinel.services.subscription import ModuleRuntimeSupervisor
@@ -21,9 +22,10 @@ class BotRuntime:
     module_supervisor: "ModuleRuntimeSupervisor"
     notification_handler: "TelegramNotificationHandler"
     job_context: "JobContext"
-    chain: "ConnectOnDemand"
+    chain: "SharedChainConnection"
     health: "HealthState"
     health_server: "HealthServer"
+    heartbeat_task: Task[None]
 
     @property
     def config(self) -> Config:

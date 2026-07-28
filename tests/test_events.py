@@ -2,8 +2,8 @@ import asyncio
 import pytest
 from types import SimpleNamespace
 
-from sentinel.chain import ConnectOnDemand
-from sentinel.config import clear_config, get_config_async, set_config
+from sentinel.chain import SharedChainConnection
+from sentinel.config import clear_config, get_config, set_config
 from sentinel.modules.community.texts import (
     bond_debt_covered,
     bond_debt_increased,
@@ -715,7 +715,7 @@ async def test_distribution_log_updated_produces_strike_notifications():
         )
     )
     event_messages = CommunityEventMessages.__new__(CommunityEventMessages)
-    event_messages.cfg = await get_config_async()
+    event_messages.cfg = get_config()
 
     payload = [
         {
@@ -785,7 +785,7 @@ async def test_distribution_log_updated_handles_empty_payload():
         )
     )
     event_messages = CommunityEventMessages.__new__(CommunityEventMessages)
-    event_messages.cfg = await get_config_async()
+    event_messages.cfg = get_config()
     event_messages._distribution_log_fetcher = _FakeFetcher(result={})
 
     event = Event(
@@ -1668,7 +1668,7 @@ def test_subscription_decodes_v2_and_v3_transition_events():
     set_config(cfg)
     try:
         w3 = AsyncWeb3()
-        module_adapter = build_module_adapter_from_config(cfg, w3, ConnectOnDemand(w3))
+        module_adapter = build_module_adapter_from_config(cfg, w3, SharedChainConnection(w3))
         event_bindings = build_event_bindings(module_adapter)
         assert "Initialized" not in COMMUNITY_CATALOG_EVENTS_BY_VERSION[2]
         decoded_event_names = {

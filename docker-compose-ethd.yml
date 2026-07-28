@@ -6,7 +6,7 @@ services:
       - csm-sentinel-persistence:/app/.storage
     restart: unless-stopped
     environment:
-      WEB3_SOCKET_PROVIDER: "ws://execution:8546"
+      WEB3_SOCKET_PROVIDERS: "ws://execution:8546"
 
 volumes:
   csm-sentinel-persistence:

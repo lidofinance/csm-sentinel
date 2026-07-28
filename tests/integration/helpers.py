@@ -49,7 +49,7 @@ def _normalise_fork_url(fork_url: str) -> str:
 
 async def start_anvil(fork_block: int, port: int, fork_url: str) -> AnvilInstance:
     if not fork_url:
-        raise RuntimeError("WEB3_SOCKET_PROVIDER must be configured for integration tests")
+        raise RuntimeError("WEB3_SOCKET_PROVIDERS must be configured for integration tests")
 
     fork_source = _normalise_fork_url(fork_url)
     cmd = [
@@ -67,14 +67,43 @@ async def start_anvil(fork_block: int, port: int, fork_url: str) -> AnvilInstanc
     try:
         await wait_for_port("127.0.0.1", port)
     except Exception:
-        process.terminate()
+        if process.returncode is None:
+            process.terminate()
+            await process.wait()
         raise
     return AnvilInstance(
         process=process, http_url=f"http://127.0.0.1:{port}", ws_url=f"ws://127.0.0.1:{port}"
     )
 
 
+async def start_anvil_node(port: int, *, chain_id: int | None = None) -> AnvilInstance:
+    cmd = [
+        "anvil",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+    ]
+    if chain_id is not None:
+        cmd.extend(("--chain-id", str(chain_id)))
+    process = await asyncio.create_subprocess_exec(*cmd)
+    try:
+        await wait_for_port("127.0.0.1", port)
+    except Exception:
+        if process.returncode is None:
+            process.terminate()
+            await process.wait()
+        raise
+    return AnvilInstance(
+        process=process,
+        http_url=f"http://127.0.0.1:{port}",
+        ws_url=f"ws://127.0.0.1:{port}",
+    )
+
+
 async def stop_anvil(instance: AnvilInstance) -> None:
+    if instance.process.returncode is not None:
+        return
     instance.process.terminate()
     try:
         await asyncio.wait_for(instance.process.wait(), timeout=5.0)
@@ -84,16 +113,14 @@ async def stop_anvil(instance: AnvilInstance) -> None:
 
 
 async def build_subscription(ws_url: str, http_url: str) -> "EventReplayHarness":
-    from sentinel.config import get_config_async
-    from sentinel.config import set_config
-    from sentinel.app.contracts import discover_contract_addresses_from_url
+    from sentinel.config import get_config, set_config
     from sentinel.app.module_adapter import build_module_adapter_from_config
-    from sentinel.chain import ConnectOnDemand
+    from sentinel.chain import SharedChainConnection
 
     persistent_w3 = AsyncWeb3(WebSocketProvider(ws_url, max_connection_retries=-1))
     backfill_w3 = AsyncWeb3(AsyncHTTPProvider(http_url))
     w3 = AsyncWeb3(WebSocketProvider(ws_url, max_connection_retries=-1))
-    cfg = await get_config_async()
+    cfg = get_config()
     try:
         addresses = await discover_contract_addresses_from_url(
             http_url, cfg.contract_addresses.module
@@ -104,25 +131,23 @@ async def build_subscription(ws_url: str, http_url: str) -> "EventReplayHarness"
         addresses = cfg.contract_addresses
     cfg = replace(cfg, contract_addresses=addresses)
     set_config(cfg)
-    module_adapter = build_module_adapter_from_config(cfg, w3, ConnectOnDemand(w3))
+    module_adapter = build_module_adapter_from_config(cfg, w3, SharedChainConnection(w3))
     return EventReplayHarness(persistent_w3, w3, backfill_w3, module_adapter)
 
 
 async def build_module_supervisor(ws_url: str, http_url: str) -> "ModuleSupervisorHarness":
-    from sentinel.config import get_config_async
-    from sentinel.config import set_config
-    from sentinel.app.contracts import discover_contract_addresses_from_url
+    from sentinel.config import get_config, set_config
     from sentinel.app.module_adapter import build_module_adapter_from_config
-    from sentinel.chain import ConnectOnDemand
+    from sentinel.chain import SharedChainConnection
 
     persistent_w3 = AsyncWeb3(WebSocketProvider(ws_url, max_connection_retries=-1))
     backfill_w3 = AsyncWeb3(AsyncHTTPProvider(http_url))
     w3 = AsyncWeb3(WebSocketProvider(ws_url, max_connection_retries=-1))
-    cfg = await get_config_async()
+    cfg = get_config()
     addresses = await discover_contract_addresses_from_url(http_url, cfg.contract_addresses.module)
     cfg = replace(cfg, contract_addresses=addresses)
     set_config(cfg)
-    chain = ConnectOnDemand(w3)
+    chain = SharedChainConnection(w3)
     module_adapter = build_module_adapter_from_config(cfg, w3, chain)
     return ModuleSupervisorHarness(persistent_w3, w3, backfill_w3, cfg, chain, module_adapter)
 
@@ -230,7 +255,7 @@ class ModuleSupervisorHarness:
         self._backfill_w3 = backfill_w3
         self._chain = chain
         self.supervisor = ModuleRuntimeSupervisor(
-            persistent_w3,
+            lambda: persistent_w3,
             config=cfg,
             chain=chain,
             health=HealthState(),
@@ -275,6 +300,17 @@ def _build_web3(provider_url: str) -> AsyncWeb3:
     else:
         provider = AsyncHTTPProvider(provider_url)
     return AsyncWeb3(provider)
+
+
+async def discover_contract_addresses_from_url(provider_url: str, module_address: str):
+    from sentinel.app.contracts import discover_contract_addresses
+
+    w3 = _build_web3(provider_url)
+    try:
+        return await discover_contract_addresses(w3, module_address)
+    finally:
+        with suppress(Exception):
+            await w3.provider.disconnect()
 
 
 async def replay_transaction_on_anvil(

@@ -41,18 +41,6 @@ def fake_contract_addresses():
     return _make
 
 
-@pytest.fixture
-def stub_discover_contract_addresses(monkeypatch, fake_contract_addresses):
-    async def _fake_discover(provider_url: str, module_address: str):
-        return fake_contract_addresses(module_address)
-
-    monkeypatch.setattr(
-        "sentinel.config._discover_contract_addresses",
-        _fake_discover,
-    )
-    return _fake_discover
-
-
 @pytest.fixture(autouse=True)
 def clear_alru_caches():
     """Reset class-level alru_cache wrappers between tests.

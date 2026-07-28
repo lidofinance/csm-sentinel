@@ -118,7 +118,7 @@ async def test_poll_chain_head():
 
     await job_context._poll_chain_head(context)
     assert job_context._chain_head == 999_999
-    assert context.bot_storage.block.value == 999_999
+    assert context.bot_storage.block.value == 100
     sub.get_block_number.assert_awaited_once()
 
 

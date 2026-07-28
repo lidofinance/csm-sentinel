@@ -43,7 +43,7 @@ These are the core guidelines for working in this repository.
 
 ## Security & Configuration
 - Never commit secrets. Use `.env` locally; base it on `.env.sample.*`.
-- Key envs: `TOKEN`, `WEB3_SOCKET_PROVIDER`, `MODULE_ADDRESS`, and URLs (`ETHERSCAN_URL`, `BEACONCHAIN_URL`, `MODULE_UI_URL`).
+- Key envs: `TOKEN`, `WEB3_SOCKET_PROVIDERS`, `MODULE_ADDRESS`, and URLs (`ETHERSCAN_URL`, `BEACONCHAIN_URL`, `MODULE_UI_URL`).
 - Persistence path is `.storage/persistence.pkl` (mounted volume in Docker).
 - Admins: `ADMIN_IDS` (comma- or space-separated Telegram user IDs) to restrict admin-only commands.
 

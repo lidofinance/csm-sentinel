@@ -10,7 +10,7 @@ from sentinel.app.contracts import (
     CuratedContractABIs,
     CuratedContractAddresses,
 )
-from sentinel.chain import ConnectOnDemand
+from sentinel.chain import SharedChainConnection
 from sentinel.module_types import ModuleType
 from sentinel.modules.base import BaseModuleAdapter, EventSource, NodeOperatorOption
 from sentinel.modules.curated.texts import CuratedTexts
@@ -113,7 +113,7 @@ class CuratedModuleAdapter(BaseModuleAdapter):
         contracts: CuratedModuleContracts,
         module_ui_url: str | None,
         contract_abis: CuratedContractABIs,
-        chain: ConnectOnDemand,
+        chain: SharedChainConnection,
     ) -> None:
         if addresses.module_type != ModuleType.CURATED:
             raise RuntimeError(f"Expected curated module, got {addresses.module_type!s}")

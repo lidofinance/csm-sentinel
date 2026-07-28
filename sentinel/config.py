@@ -1,11 +1,7 @@
-import asyncio
-import logging
 import os
 from dataclasses import dataclass
 
-from sentinel.app.contracts import ContractAddresses, log_discovered_addresses
-
-logger = logging.getLogger(__name__)
+from sentinel.app.contracts import ContractAddresses
 
 
 def _parse_admin_ids(raw: str) -> set[int]:
@@ -22,15 +18,13 @@ def _parse_admin_ids(raw: str) -> set[int]:
 
 
 @dataclass(frozen=True)
-class Config:
+class ConfigValues:
     # Paths and tokens
     filestorage_path: str
     token: str | None
-    web3_socket_provider: str
+    web3_socket_providers: tuple[str, ...]
     healthcheck_host: str
     healthcheck_port: int
-
-    contract_addresses: ContractAddresses
 
     # URLs
     etherscan_url: str | None
@@ -57,9 +51,34 @@ class Config:
         return None if not self.beaconchain_url else f"{self.beaconchain_url}/validator/{{}}"
 
 
+@dataclass(frozen=True)
+class EnvConfig(ConfigValues):
+    module_address: str
+
+    def resolve(self, contract_addresses: ContractAddresses) -> "Config":
+        return Config(
+            filestorage_path=self.filestorage_path,
+            token=self.token,
+            web3_socket_providers=self.web3_socket_providers,
+            healthcheck_host=self.healthcheck_host,
+            healthcheck_port=self.healthcheck_port,
+            contract_addresses=contract_addresses,
+            etherscan_url=self.etherscan_url,
+            beaconchain_url=self.beaconchain_url,
+            module_ui_url=self.module_ui_url,
+            block_batch_size=self.block_batch_size,
+            process_blocks_requests_per_second=self.process_blocks_requests_per_second,
+            block_from=self.block_from,
+            admin_ids=self.admin_ids,
+        )
+
+
+@dataclass(frozen=True)
+class Config(ConfigValues):
+    contract_addresses: ContractAddresses
+
+
 _CONFIG: Config | None = None
-RPC_DISCOVERY_TIMEOUT_SECONDS = 30
-RPC_DISCOVERY_RETRY_DELAY_SECONDS = 10
 
 
 def _parse_healthcheck_port(raw: str | None) -> int:
@@ -78,23 +97,34 @@ def get_healthcheck_bind_from_env() -> tuple[str, int]:
     )
 
 
-async def _build_config_from_env() -> Config:
+def _parse_provider_urls(raw: str) -> tuple[str, ...]:
+    providers: list[str] = []
+    for token in raw.split(","):
+        provider = token.strip()
+        if provider and provider not in providers:
+            providers.append(provider)
+    return tuple(providers)
+
+
+def load_config_from_env() -> EnvConfig:
     filestorage_path = os.getenv("FILESTORAGE_PATH", ".storage")
     token = os.getenv("TOKEN")
-    web3_socket_provider = os.getenv("WEB3_SOCKET_PROVIDER")
+    raw_web3_socket_providers = os.getenv("WEB3_SOCKET_PROVIDERS") or os.getenv(
+        "WEB3_SOCKET_PROVIDER"
+    )
     healthcheck_host, healthcheck_port = get_healthcheck_bind_from_env()
     module_address = os.getenv("MODULE_ADDRESS")
 
-    if not web3_socket_provider:
-        raise RuntimeError("WEB3_SOCKET_PROVIDER must be configured")
+    if not raw_web3_socket_providers:
+        raise RuntimeError(
+            "WEB3_SOCKET_PROVIDERS or legacy WEB3_SOCKET_PROVIDER must be configured"
+        )
     if not module_address:
         raise RuntimeError("MODULE_ADDRESS must be configured")
 
-    addresses = await _discover_contract_addresses_with_retry(
-        web3_socket_provider,
-        module_address,
-    )
-
+    provider_urls = _parse_provider_urls(raw_web3_socket_providers)
+    if not provider_urls:
+        raise RuntimeError("WEB3_SOCKET_PROVIDERS must contain at least one provider URL")
     process_blocks_requests_per_second = os.getenv("PROCESS_BLOCKS_REQUESTS_PER_SECOND")
     if process_blocks_requests_per_second:
         process_blocks_requests_per_second = float(process_blocks_requests_per_second)
@@ -106,13 +136,13 @@ async def _build_config_from_env() -> Config:
     raw_block_from = os.getenv("BLOCK_FROM")
     block_from = int(raw_block_from) if raw_block_from else None
 
-    return Config(
+    return EnvConfig(
         filestorage_path=filestorage_path,
         token=token,
-        web3_socket_provider=web3_socket_provider,
+        web3_socket_providers=provider_urls,
         healthcheck_host=healthcheck_host,
         healthcheck_port=healthcheck_port,
-        contract_addresses=addresses,
+        module_address=module_address,
         etherscan_url=os.getenv("ETHERSCAN_URL"),
         beaconchain_url=os.getenv("BEACONCHAIN_URL"),
         module_ui_url=os.getenv("MODULE_UI_URL"),
@@ -124,23 +154,8 @@ async def _build_config_from_env() -> Config:
 
 
 def get_config() -> Config:
-    global _CONFIG
     if _CONFIG is None:
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            _CONFIG = asyncio.run(_build_config_from_env())
-        else:
-            raise RuntimeError(
-                "get_config() cannot be called from an async context, use get_config_async() instead"
-            )
-    return _CONFIG
-
-
-async def get_config_async() -> Config:
-    global _CONFIG
-    if _CONFIG is None:
-        _CONFIG = await _build_config_from_env()
+        raise RuntimeError("Runtime config has not been resolved")
     return _CONFIG
 
 
@@ -153,31 +168,3 @@ def clear_config() -> None:
     """Basically for tests."""
     global _CONFIG
     _CONFIG = None
-
-
-async def _discover_contract_addresses(provider_url: str, module_address: str):
-    from sentinel.app.contracts import discover_contract_addresses_from_url
-
-    return await discover_contract_addresses_from_url(provider_url, module_address)
-
-
-async def _discover_contract_addresses_with_retry(provider_url: str, module_address: str):
-    attempt = 1
-    while True:
-        try:
-            addresses = await asyncio.wait_for(
-                _discover_contract_addresses(provider_url, module_address),
-                timeout=RPC_DISCOVERY_TIMEOUT_SECONDS,
-            )
-            log_discovered_addresses(addresses)
-            return addresses
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Timed out discovering contract addresses from WEB3 provider after %ss "
-                "(attempt %s). Retrying in %ss.",
-                RPC_DISCOVERY_TIMEOUT_SECONDS,
-                attempt,
-                RPC_DISCOVERY_RETRY_DELAY_SECONDS,
-            )
-            attempt += 1
-            await asyncio.sleep(RPC_DISCOVERY_RETRY_DELAY_SECONDS)

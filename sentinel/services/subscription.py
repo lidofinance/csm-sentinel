@@ -4,18 +4,21 @@ from contextlib import suppress
 from dataclasses import dataclass
 from dataclasses import replace
 import signal
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
+
+from web3 import AsyncWeb3
 
 from sentinel.app.contracts import discover_contract_addresses, log_discovered_addresses
 from sentinel.app.health import HealthState
 from sentinel.app.module_adapter import build_module_adapter_from_config
-from sentinel.chain import ConnectOnDemand
+from sentinel.chain import SharedChainConnection
 from sentinel.config import Config
 from sentinel.config import set_config
 from sentinel.models import Block, Event
 from sentinel.modules.community.adapter import CommunityModuleAdapter
 from sentinel.modules.side_effects import ModuleEventSideEffects
 from sentinel.rpc import Subscription
+from sentinel.rpc_provider import RpcAvailabilityError
 from sentinel.services.aggregation import (
     AggregationCoordinator,
     NotificationSink,
@@ -25,6 +28,7 @@ from sentinel.services.event_history import Web3EventHistory
 
 logger = logging.getLogger(__name__)
 logging.getLogger("web3.providers.WebSocketProvider").setLevel(logging.WARNING)
+RPC_RECOVERY_RETRY_SECONDS = 1.0
 
 if TYPE_CHECKING:
     from asyncio import AbstractEventLoop
@@ -134,17 +138,17 @@ class ModuleRuntimeSupervisor:
 
     def __init__(
         self,
-        w3,
+        subscription_w3_factory: Callable[[], AsyncWeb3],
         *,
         config: Config,
-        chain: ConnectOnDemand,
+        chain: SharedChainConnection,
         health: HealthState,
         module_adapter: "ModuleAdapter",
         storage: ProcessingStateProvider,
         notification_sink: NotificationSink,
         backfill_w3=None,
     ) -> None:
-        self._w3 = w3
+        self._subscription_w3_factory = subscription_w3_factory
         self._backfill_w3 = backfill_w3
         self._config = config
         self._chain = chain
@@ -161,7 +165,7 @@ class ModuleRuntimeSupervisor:
 
     def _new_module_runtime(self, module_adapter: "ModuleAdapter") -> ModuleRuntime:
         return build_module_runtime(
-            self._w3,
+            self._subscription_w3_factory(),
             health=self._health,
             backfill_w3=self._backfill_w3,
             module_adapter=module_adapter,
@@ -251,22 +255,57 @@ class ModuleRuntimeSupervisor:
         self._module_runtime_restarted.clear()
         raw_subscription_task = asyncio.create_task(raw_subscription.subscribe())
         restart_task = asyncio.create_task(self._module_runtime_restarted.wait())
-        await self._replay_pending_blocks_after_restart()
-        done, pending = await asyncio.wait(
-            {raw_subscription_task, restart_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        subscribed_task: asyncio.Task[None] | None = None
+        try:
+            if self._pending_replay_start_block is not None:
+                subscribed_task = asyncio.create_task(
+                    raw_subscription.wait_until_subscribed(timeout=None)
+                )
+                done, _ = await asyncio.wait(
+                    {raw_subscription_task, restart_task, subscribed_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if restart_task in done:
+                    await raw_subscription.stop()
+                    with suppress(CsmVersionUpgradeRequired):
+                        await raw_subscription_task
+                    return True
+                if raw_subscription_task in done:
+                    return await self._handle_subscription_result(
+                        raw_subscription, raw_subscription_task
+                    )
+                await subscribed_task
+                try:
+                    await self._replay_pending_blocks_after_restart()
+                except RpcAvailabilityError as exc:
+                    if self._shutdown_requested:
+                        return False
+                    await self._restart_after_rpc_disconnect(exc)
+                    return True
 
-        if restart_task in done:
-            await raw_subscription.stop()
-            with suppress(CsmVersionUpgradeRequired):
-                await raw_subscription_task
-            return True
+            done, _ = await asyncio.wait(
+                {raw_subscription_task, restart_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if restart_task in done:
+                await raw_subscription.stop()
+                with suppress(CsmVersionUpgradeRequired):
+                    await raw_subscription_task
+                return True
+            return await self._handle_subscription_result(raw_subscription, raw_subscription_task)
+        finally:
+            for task in (subscribed_task, raw_subscription_task, restart_task):
+                if task is None or task.done():
+                    continue
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
 
-        for pending_task in pending:
-            pending_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await pending_task
+    async def _handle_subscription_result(
+        self,
+        raw_subscription: Subscription,
+        raw_subscription_task: asyncio.Task[None],
+    ) -> bool:
         try:
             await raw_subscription_task
         except CsmVersionUpgradeRequired as upgrade:
@@ -274,14 +313,36 @@ class ModuleRuntimeSupervisor:
             self._pending_replay_start_block = replay_start_block
             await raw_subscription.stop()
             return True
-        return False
+        except RpcAvailabilityError as exc:
+            if self._shutdown_requested:
+                return False
+            await self._restart_after_rpc_disconnect(exc)
+            return True
+        if self._shutdown_requested:
+            return False
+        await self._restart_after_rpc_disconnect(RuntimeError("Subscription stopped unexpectedly"))
+        return True
+
+    async def _restart_after_rpc_disconnect(self, exc: BaseException) -> None:
+        previous_runtime = self.module_runtime
+        replay_start_block = max(self._storage.state.block.value, 1)
+        logger.warning(
+            "RPC connection lost; rebuilding subscription runtime and replaying from block %s: %s",
+            replay_start_block,
+            exc.__class__.__name__,
+        )
+        self._health.mark_catchup_started()
+        previous_runtime.raw_subscription.request_shutdown()
+        await previous_runtime.raw_subscription.abort()
+        await previous_runtime.close()
+        self._pending_replay_start_block = replay_start_block
+        self._install_module_runtime(self._new_module_runtime(previous_runtime.module_adapter))
 
     async def _replay_pending_blocks_after_restart(self) -> None:
         replay_start_block = self._pending_replay_start_block
         if replay_start_block is None:
             return
 
-        await self.wait_until_subscribed()
         catchup_head = await self.raw_subscription.get_block_number()
         self._catchup_until_block = catchup_head
         try:
@@ -290,11 +351,12 @@ class ModuleRuntimeSupervisor:
                 end_block=catchup_head,
                 suppress_live_events_until=catchup_head,
             )
+            self._health.mark_catchup_complete()
         finally:
             self._catchup_until_block = None
         self._pending_replay_start_block = None
 
-    async def wait_until_subscribed(self, *, timeout: float = 10.0) -> None:
+    async def wait_until_subscribed(self, *, timeout: float | None = None) -> None:
         await self.raw_subscription.wait_until_subscribed(timeout=timeout)
 
     async def get_block_number(self) -> int:
@@ -310,9 +372,9 @@ class ModuleRuntimeSupervisor:
         replay_start_block = start_block
         try:
             while not self._shutdown_requested:
-                catchup_head = await self.raw_subscription.get_block_number()
-                self._catchup_until_block = catchup_head
                 try:
+                    catchup_head = await self.raw_subscription.get_block_number()
+                    self._catchup_until_block = catchup_head
                     await self.raw_subscription.replay_blocks(
                         replay_start_block,
                         end_block=catchup_head,
@@ -322,6 +384,19 @@ class ModuleRuntimeSupervisor:
                 except CsmVersionUpgradeRequired as upgrade:
                     replay_start_block = await self._handle_module_upgrade(upgrade)
                     await self.wait_until_subscribed()
+                except RpcAvailabilityError as exc:
+                    if self._shutdown_requested:
+                        return
+                    replay_start_block = max(
+                        replay_start_block,
+                        self._storage.state.block.value + 1,
+                    )
+                    logger.warning(
+                        "Catch-up RPC failed; retrying from block %s: %s",
+                        replay_start_block,
+                        exc,
+                    )
+                    await asyncio.sleep(RPC_RECOVERY_RETRY_SECONDS)
         finally:
             self._catchup_until_block = None
 
@@ -336,5 +411,7 @@ class ModuleRuntimeSupervisor:
     async def close(self) -> None:
         self.request_shutdown()
         await self.module_runtime.close()
-        with suppress(asyncio.CancelledError):
-            await self.shutdown()
+        await self.raw_subscription.stop()
+        if self._backfill_w3 is not None and hasattr(self._backfill_w3.provider, "disconnect"):
+            with suppress(Exception):
+                await self._backfill_w3.provider.disconnect()
