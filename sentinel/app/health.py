@@ -26,6 +26,7 @@ class HealthSnapshot:
     live: bool
     polling_started: bool
     subscription_active: bool
+    catchup_active: bool
     warmup_started: bool
     warmup_complete: bool
     warmup_error: str | None
@@ -44,6 +45,7 @@ class HealthState:
         self._startup_complete = False
         self._polling_started = False
         self._subscription_active = False
+        self._catchup_active = False
         self._warmup_started = False
         self._warmup_complete = False
         self._warmup_error: str | None = None
@@ -73,6 +75,17 @@ class HealthState:
     def mark_progress(self) -> None:
         now = self._clock()
         with self._lock:
+            self._last_progress_at = now
+            self._last_heartbeat_at = now
+
+    def mark_catchup_started(self) -> None:
+        with self._lock:
+            self._catchup_active = True
+
+    def mark_catchup_complete(self) -> None:
+        now = self._clock()
+        with self._lock:
+            self._catchup_active = False
             self._last_progress_at = now
             self._last_heartbeat_at = now
 
@@ -144,6 +157,7 @@ class HealthState:
                 self._startup_complete
                 and self._polling_started
                 and self._subscription_active
+                and not self._catchup_active
                 and not self._shutting_down
                 and self._fatal_error is None
                 and progress_age is not None
@@ -155,6 +169,7 @@ class HealthState:
                 live=live,
                 polling_started=self._polling_started,
                 subscription_active=self._subscription_active,
+                catchup_active=self._catchup_active,
                 warmup_started=self._warmup_started,
                 warmup_complete=self._warmup_complete,
                 warmup_error=self._warmup_error,
@@ -226,6 +241,7 @@ class HealthServer:
                         "live": snapshot.live,
                         "polling_started": snapshot.polling_started,
                         "subscription_active": snapshot.subscription_active,
+                        "catchup_active": snapshot.catchup_active,
                         "warmup_started": snapshot.warmup_started,
                         "warmup_complete": snapshot.warmup_complete,
                         "warmup_error": snapshot.warmup_error,

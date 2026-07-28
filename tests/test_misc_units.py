@@ -6,10 +6,7 @@ from unittest.mock import patch
 
 from hexbytes import HexBytes
 import pytest
-import web3.exceptions
 from web3.types import FilterParams
-
-from sentinel.config import clear_config
 
 
 def test_event_readable_string():
@@ -149,16 +146,15 @@ def test_parse_distribution_log_supports_v1_v2_and_v3_report_shapes():
         "BLOCK_BATCH_SIZE": "12345",
         "PROCESS_BLOCKS_REQUESTS_PER_SECOND": "3.5",
         "BLOCK_FROM": "789",
-        "WEB3_SOCKET_PROVIDER": "wss://example.invalid",
+        "WEB3_SOCKET_PROVIDERS": "wss://example.invalid",
         "MODULE_ADDRESS": "0x0000000000000000000000000000000000000001",
     },
     clear=True,
 )
-def test_config_parsing_and_templates(monkeypatch, stub_discover_contract_addresses):
-    from sentinel.config import get_config
+def test_config_parsing_and_templates():
+    from sentinel.config import load_config_from_env
 
-    clear_config()
-    cfg = get_config()
+    cfg = load_config_from_env()
 
     assert cfg.admin_ids == {1, 2, 3, 4}
     assert cfg.block_batch_size == 12345
@@ -167,37 +163,104 @@ def test_config_parsing_and_templates(monkeypatch, stub_discover_contract_addres
     assert cfg.etherscan_block_url_template == "https://etherscan.io/block/{}"
     assert cfg.etherscan_tx_url_template == "https://etherscan.io/tx/{}"
     assert cfg.beaconchain_url_template == "https://beaconcha.in/validator/{}"
-    clear_config()
 
 
 @pytest.mark.asyncio
 @patch.dict(
     os.environ,
     {
-        "WEB3_SOCKET_PROVIDER": "wss://example.invalid",
+        "WEB3_SOCKET_PROVIDERS": "wss://example.invalid",
         "MODULE_ADDRESS": "0x0000000000000000000000000000000000000001",
         "PROCESS_BLOCKS_REQUESTS_PER_SECOND": "2",
     },
     clear=True,
 )
-async def test_process_blocks_rate_limit(monkeypatch, stub_discover_contract_addresses):
-    from sentinel.config import get_config_async
+async def test_process_blocks_rate_limit():
+    from sentinel.config import load_config_from_env
     from sentinel.web3_event_log_reader import Web3EventLogReader
 
-    clear_config()
-    cfg = await get_config_async()
+    cfg = load_config_from_env()
     reader = Web3EventLogReader(
         SimpleNamespace(),
         request_interval_seconds=1 / cfg.process_blocks_requests_per_second,
     )
-    try:
-        start = asyncio.get_running_loop().time()
-        await reader.throttle()
-        await reader.throttle()
-        elapsed = asyncio.get_running_loop().time() - start
-        assert elapsed >= 0.45
-    finally:
-        clear_config()
+    start = asyncio.get_running_loop().time()
+    await reader.throttle()
+    await reader.throttle()
+    elapsed = asyncio.get_running_loop().time() - start
+    assert elapsed >= 0.45
+
+
+@pytest.mark.asyncio
+async def test_event_log_reader_cancels_connect_when_stopped():
+    from sentinel.web3_event_log_reader import Web3EventLogReader
+
+    connect_started = asyncio.Event()
+    connect_cancelled = asyncio.Event()
+
+    async def connect() -> None:
+        connect_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            connect_cancelled.set()
+            raise
+
+    stop_event = asyncio.Event()
+    rpc_w3 = SimpleNamespace(
+        provider=SimpleNamespace(
+            is_connected=AsyncMock(return_value=False),
+            connect=connect,
+        )
+    )
+    reader = Web3EventLogReader(
+        rpc_w3,
+        request_interval_seconds=None,
+        stop_event=stop_event,
+    )
+
+    fetch_task = asyncio.create_task(reader.fetch_events(start_block=1, end_block=1))
+    await connect_started.wait()
+    stop_event.set()
+
+    assert await asyncio.wait_for(fetch_task, timeout=1) is None
+    assert connect_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_event_log_reader_cancels_active_rpc_when_stopped():
+    from sentinel.web3_event_log_reader import Web3EventLogReader
+
+    request_started = asyncio.Event()
+    request_cancelled = asyncio.Event()
+
+    async def get_logs(_filter_params):
+        request_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            request_cancelled.set()
+            raise
+
+    stop_event = asyncio.Event()
+    rpc_w3 = SimpleNamespace(eth=SimpleNamespace(get_logs=get_logs))
+    reader = Web3EventLogReader(
+        rpc_w3,
+        request_interval_seconds=None,
+        stop_event=stop_event,
+    )
+
+    request_task = asyncio.create_task(
+        reader.get_logs(
+            w3=rpc_w3,
+            filter_params=FilterParams(fromBlock=1, toBlock=1),
+        )
+    )
+    await request_started.wait()
+    stop_event.set()
+
+    assert await asyncio.wait_for(request_task, timeout=1) is None
+    assert request_cancelled.is_set()
 
 
 @pytest.mark.asyncio
@@ -541,83 +604,3 @@ async def test_web3_event_history_fetches_configured_reader_range():
         start_block=1,
         end_block=2,
     )
-
-
-@pytest.mark.asyncio
-@patch.dict(
-    os.environ,
-    {
-        "WEB3_SOCKET_PROVIDER": "wss://example.invalid",
-        "MODULE_ADDRESS": "0x0000000000000000000000000000000000000001",
-    },
-    clear=True,
-)
-async def test_get_logs_with_retry_recovers_from_rate_limit(
-    monkeypatch,
-    stub_discover_contract_addresses,
-):
-    from sentinel.web3_event_log_reader import Web3EventLogReader
-
-    rate_limit_error = web3.exceptions.Web3RPCError(
-        message="{'code': 429, 'message': 'throughput exceeded'}",
-        rpc_response={"error": {"code": 429, "message": "throughput exceeded"}},
-    )
-    rpc_w3 = SimpleNamespace(
-        eth=SimpleNamespace(
-            get_logs=AsyncMock(side_effect=[rate_limit_error, []]),
-        ),
-    )
-    reader = Web3EventLogReader(rpc_w3, request_interval_seconds=None)
-    monkeypatch.setattr("sentinel.web3_event_log_reader.GET_LOGS_RETRY_INITIAL_DELAY_SECONDS", 0)
-    monkeypatch.setattr("sentinel.web3_event_log_reader.GET_LOGS_RETRY_MAX_DELAY_SECONDS", 0)
-
-    logs = await reader.get_logs_with_retry(
-        w3=rpc_w3,
-        filter_params=FilterParams(fromBlock=1, toBlock=1, address="0x1"),
-        contract="0x1",
-        batch_start=1,
-        batch_end=1,
-    )
-
-    assert logs == []
-    assert rpc_w3.eth.get_logs.await_count == 2
-
-
-@pytest.mark.asyncio
-@patch.dict(
-    os.environ,
-    {
-        "WEB3_SOCKET_PROVIDER": "wss://example.invalid",
-        "MODULE_ADDRESS": "0x0000000000000000000000000000000000000001",
-    },
-    clear=True,
-)
-async def test_get_logs_with_retry_raises_non_retryable_errors(
-    monkeypatch,
-    stub_discover_contract_addresses,
-):
-    from sentinel.web3_event_log_reader import Web3EventLogReader
-
-    fatal_error = web3.exceptions.Web3RPCError(
-        message="execution reverted",
-        rpc_response={"error": {"code": 3, "message": "execution reverted"}},
-    )
-    rpc_w3 = SimpleNamespace(
-        eth=SimpleNamespace(
-            get_logs=AsyncMock(side_effect=fatal_error),
-        ),
-    )
-    reader = Web3EventLogReader(rpc_w3, request_interval_seconds=None)
-    monkeypatch.setattr("sentinel.web3_event_log_reader.GET_LOGS_RETRY_INITIAL_DELAY_SECONDS", 0)
-    monkeypatch.setattr("sentinel.web3_event_log_reader.GET_LOGS_RETRY_MAX_DELAY_SECONDS", 0)
-
-    with pytest.raises(web3.exceptions.Web3RPCError):
-        await reader.get_logs_with_retry(
-            w3=rpc_w3,
-            filter_params=FilterParams(fromBlock=1, toBlock=1, address="0x1"),
-            contract="0x1",
-            batch_start=1,
-            batch_end=1,
-        )
-
-    assert rpc_w3.eth.get_logs.await_count == 1

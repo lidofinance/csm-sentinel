@@ -1,7 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from hexbytes import HexBytes
 import pytest
@@ -13,12 +13,18 @@ from sentinel.app.telegram_adapters import (
     TelegramNotificationSink,
     TelegramProcessingStateProvider,
 )
-from sentinel.chain import ConnectOnDemand
+from sentinel.chain import SharedChainConnection
 from sentinel.config import Config, clear_config, set_config
 from sentinel.module_types import ModuleType
 from sentinel.app.storage import BotStorage
 from sentinel.models import Block, Event, EventNotification
 from sentinel.notifications import NotificationPlan
+from sentinel.rpc_provider import (
+    RpcEndpointsUnavailable,
+    RpcFailureKind,
+    RpcFailureSummary,
+    RpcSubscriptionReconnectRequired,
+)
 from sentinel.modules.aggregation import (
     DEPOSITED_SIGNING_KEYS_COUNT_CHANGED,
     TOTAL_SIGNING_KEYS_COUNT_CHANGED,
@@ -86,7 +92,7 @@ def _make_config(csm_version: int) -> Config:
     return Config(
         filestorage_path=".storage",
         token="token",
-        web3_socket_provider="wss://example.invalid",
+        web3_socket_providers=("wss://example.invalid",),
         healthcheck_host="0.0.0.0",
         healthcheck_port=8080,
         contract_addresses=CommunityContractAddresses(
@@ -317,12 +323,12 @@ async def test_csm_upgrade_rebuilds_module_runtime_and_rewinds_checkpoint():
     w3 = _FakeW3()
     set_config(cfg)
     try:
-        chain = ConnectOnDemand(w3)
+        chain = SharedChainConnection(w3)
         module_adapter = build_module_adapter_from_config(cfg, w3, chain)
         application = SimpleNamespace(bot_data={}, update_queue=SimpleNamespace(put=AsyncMock()))
 
         subscription = ModuleRuntimeSupervisor(
-            w3,
+            lambda: w3,
             config=cfg,
             chain=chain,
             health=HealthState(),
@@ -366,6 +372,123 @@ async def test_csm_upgrade_rebuilds_module_runtime_and_rewinds_checkpoint():
 
 
 @pytest.mark.asyncio
+async def test_rpc_disconnect_rebuilds_runtime_and_replays_from_persisted_block(monkeypatch):
+    from sentinel.app.module_adapter import build_module_adapter_from_config
+
+    cfg = _make_config(csm_version=2)
+    w3 = _FakeW3()
+    replacement_w3 = _FakeW3()
+    subscription_w3_factory = Mock(side_effect=[w3, replacement_w3])
+    set_config(cfg)
+    try:
+        chain = SharedChainConnection(w3)
+        module_adapter = build_module_adapter_from_config(cfg, w3, chain)
+        application = SimpleNamespace(
+            bot_data={"block": 123},
+            update_queue=SimpleNamespace(put=AsyncMock()),
+        )
+        supervisor = ModuleRuntimeSupervisor(
+            subscription_w3_factory,
+            config=cfg,
+            chain=chain,
+            health=HealthState(),
+            module_adapter=module_adapter,
+            storage=TelegramProcessingStateProvider(application),
+            notification_sink=TelegramNotificationSink(application),
+        )
+        original_runtime = supervisor.module_runtime
+        original_runtime.raw_subscription.subscribe = AsyncMock(
+            side_effect=RpcSubscriptionReconnectRequired.listener_stopped()
+        )
+        original_runtime.raw_subscription.abort = AsyncMock()
+        original_runtime.aggregation.close = AsyncMock()
+
+        restarted = await supervisor._subscribe_until_restarted_or_stopped()
+
+        assert restarted is True
+        assert supervisor.module_runtime is not original_runtime
+        assert supervisor._pending_replay_start_block == 123
+        assert supervisor._health.snapshot().catchup_active is True
+        original_runtime.raw_subscription.abort.assert_awaited_once()
+        original_runtime.aggregation.close.assert_awaited_once()
+        assert supervisor.raw_subscription._w3 is replacement_w3  # noqa: SLF001
+        assert subscription_w3_factory.call_count == 2
+
+        supervisor.raw_subscription.get_block_number = AsyncMock(return_value=130)
+        supervisor.raw_subscription.replay_blocks = AsyncMock()
+        await supervisor._replay_pending_blocks_after_restart()
+
+        supervisor.raw_subscription.replay_blocks.assert_awaited_once_with(
+            123,
+            end_block=130,
+            suppress_live_events_until=130,
+        )
+        assert supervisor._pending_replay_start_block is None
+        assert supervisor._health.snapshot().catchup_active is False
+
+        supervisor.raw_subscription.wait_until_subscribed = AsyncMock()
+        await supervisor.wait_until_subscribed()
+        supervisor.raw_subscription.wait_until_subscribed.assert_awaited_once_with(timeout=None)
+
+        supervisor._pending_replay_start_block = 131
+        supervisor._health.mark_catchup_started()
+        supervisor.raw_subscription.get_block_number = AsyncMock(return_value=140)
+        supervisor.raw_subscription.replay_blocks = AsyncMock(
+            side_effect=RpcEndpointsUnavailable("backfill connection lost")
+        )
+
+        with pytest.raises(RpcEndpointsUnavailable):
+            await supervisor._replay_pending_blocks_after_restart()
+
+        assert supervisor._pending_replay_start_block == 131
+        assert supervisor._health.snapshot().catchup_active is True
+
+        monkeypatch.setattr("sentinel.services.subscription.RPC_RECOVERY_RETRY_SECONDS", 0)
+        head_error = RpcSubscriptionReconnectRequired(
+            "eth_blockNumber",
+            RpcFailureSummary(
+                endpoint_index=0,
+                endpoint_label="rpc-1 (primary.invalid)",
+                kind=RpcFailureKind.RPC_REJECTED,
+                rpc_code=-32000,
+            ),
+        )
+        supervisor.raw_subscription.get_block_number = AsyncMock(side_effect=[head_error, 130])
+        supervisor.raw_subscription.replay_blocks = AsyncMock()
+
+        await supervisor.catch_up_from(124)
+
+        assert supervisor.raw_subscription.get_block_number.await_count == 2
+        supervisor.raw_subscription.replay_blocks.assert_awaited_once_with(
+            124,
+            end_block=130,
+            suppress_live_events_until=130,
+        )
+
+        replay_attempt = 0
+
+        async def replay_with_transient_rpc_failure(*args, **kwargs):
+            nonlocal replay_attempt
+            replay_attempt += 1
+            if replay_attempt == 1:
+                application.bot_data["block"] = 125
+                raise RpcEndpointsUnavailable("provider-specific error")
+
+        supervisor.raw_subscription.get_block_number = AsyncMock(return_value=130)
+        supervisor.raw_subscription.replay_blocks = AsyncMock(
+            side_effect=replay_with_transient_rpc_failure
+        )
+
+        await supervisor.catch_up_from(124)
+
+        replay_calls = supervisor.raw_subscription.replay_blocks.await_args_list
+        assert replay_calls[0].args == (124,)
+        assert replay_calls[1].args == (126,)
+    finally:
+        clear_config()
+
+
+@pytest.mark.asyncio
 async def test_module_runtime_interrupts_v2_upgrade_before_side_effects_and_notifications():
     from sentinel.app.module_adapter import build_module_adapter_from_config
 
@@ -373,7 +496,7 @@ async def test_module_runtime_interrupts_v2_upgrade_before_side_effects_and_noti
     w3 = _FakeW3()
     set_config(cfg)
     try:
-        module_adapter = build_module_adapter_from_config(cfg, w3, ConnectOnDemand(w3))
+        module_adapter = build_module_adapter_from_config(cfg, w3, SharedChainConnection(w3))
         harness = _make_processing_harness(aggregation_group=None, event_names=frozenset())
         runtime = ModuleRuntime(
             module_adapter=module_adapter,
@@ -631,7 +754,7 @@ async def test_subscription_stop_is_idempotent_for_concurrent_shutdowns():
 
 
 @pytest.mark.asyncio
-async def test_subscription_stop_tolerates_already_detached_web3_subscription():
+async def test_subscription_stop_does_not_hide_unexpected_value_error():
     try:
         subscription = _make_raw_subscription()
         unsubscribe_all = AsyncMock(side_effect=ValueError("list.remove(x): x not in list"))
@@ -639,10 +762,29 @@ async def test_subscription_stop_tolerates_already_detached_web3_subscription():
             unsubscribe_all=unsubscribe_all,
         )
 
-        await subscription.stop()
-        await subscription.stop()
+        with pytest.raises(ValueError, match="list.remove"):
+            await subscription.stop()
 
         unsubscribe_all.assert_awaited_once()
+    finally:
+        clear_config()
+
+
+@pytest.mark.asyncio
+async def test_subscription_abort_does_not_unsubscribe_stale_ids():
+    try:
+        subscription = _make_raw_subscription()
+        unsubscribe_all = AsyncMock()
+        disconnect = AsyncMock()
+        subscription._w3.subscription_manager = SimpleNamespace(  # noqa: SLF001
+            unsubscribe_all=unsubscribe_all,
+        )
+        subscription._w3.provider = SimpleNamespace(disconnect=disconnect)  # noqa: SLF001
+
+        await subscription.abort()
+
+        unsubscribe_all.assert_not_awaited()
+        disconnect.assert_awaited_once()
     finally:
         clear_config()
 
@@ -931,7 +1073,7 @@ async def test_pending_aggregation_uses_replaced_application_bot_data():
     w3 = _FakeW3()
     set_config(cfg)
     try:
-        chain = ConnectOnDemand(w3)
+        chain = SharedChainConnection(w3)
         module_adapter = build_module_adapter_from_config(cfg, w3, chain)
         aggregation_group = AggregationGroup(
             name="total_signing_key_counts",
@@ -949,7 +1091,7 @@ async def test_pending_aggregation_uses_replaced_application_bot_data():
             update_queue=SimpleNamespace(put=AsyncMock()),
         )
         subscription = ModuleRuntimeSupervisor(
-            w3,
+            lambda: w3,
             config=cfg,
             chain=chain,
             health=HealthState(),

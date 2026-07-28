@@ -40,7 +40,10 @@ Then, create a `.env` by copying the sample matching the module and network you 
 
 Fill in the required fields:
 - `TOKEN`: The token you received from the BotFather
-- `WEB3_SOCKET_PROVIDER`: The websocket provider for your node. 
+- `WEB3_SOCKET_PROVIDERS`: A comma-separated list of websocket providers. The first URL is
+the primary provider; SM Sentinel switches to the next healthy URL when the active
+connection fails. `WEB3_SOCKET_PROVIDER` remains supported as an equivalent legacy alias;
+`WEB3_SOCKET_PROVIDERS` takes precedence when both are set.
 Preferably, use your own local node, for example the execution node you already run for validators.
 But it is also possible to use a public node of any web3 providers.
 - `MODULE_ADDRESS`: The staking module address to monitor. Use the CSM address for a CSM instance or the Curated Module address for a Curated instance.
@@ -113,7 +116,7 @@ You need to use a special docker-compose file that connects the Sentinel instanc
 docker compose -f docker-compose-ethd.yml up -d
 ```
 
-`WEB3_SOCKET_PROVIDER` env variable is set to `ws://execution:8546` via docker-compose file, 
+`WEB3_SOCKET_PROVIDERS` env variable is set to `ws://execution:8546` via docker-compose file,
 so you don't need to specify it in the `.env` file.
 
 ## Extra configuration
@@ -167,7 +170,7 @@ To enable the suite:
 
 1. Install a local fork provider:
    - [`anvil`](https://book.getfoundry.sh/anvil/)
-2. Ensure `.env` contains a `WEB3_SOCKET_PROVIDER` that can serve archive data;
+2. Ensure `.env` contains a `WEB3_SOCKET_PROVIDERS` entry that can serve archive data;
    the tests reuse this value as the fork source (WebSocket URLs are
    translated to their HTTP equivalents automatically)
 

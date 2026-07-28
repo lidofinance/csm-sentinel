@@ -13,12 +13,12 @@ CURATED_HOODI_MODULE = "0x87EB69Ae51317405FD285efD2326a4a11f6173b9"
 def curated_hoodi_config_env():
     """Point this suite at the Hoodi Curated deployment used by the fixture blocks."""
 
-    provider_url = os.getenv("WEB3_SOCKET_PROVIDER")
+    provider_url = os.getenv("WEB3_SOCKET_PROVIDERS") or os.getenv("WEB3_SOCKET_PROVIDER")
     if not provider_url:
-        pytest.skip("WEB3_SOCKET_PROVIDER is required")
+        pytest.skip("WEB3_SOCKET_PROVIDERS or WEB3_SOCKET_PROVIDER is required")
 
     with pytest.MonkeyPatch.context() as m:
-        m.setenv("WEB3_SOCKET_PROVIDER", provider_url)
+        m.setenv("WEB3_SOCKET_PROVIDERS", provider_url)
         m.setenv("MODULE_ADDRESS", CURATED_HOODI_MODULE)
         m.setenv("ETHERSCAN_URL", "https://etherscan.io")
         m.setenv("BEACONCHAIN_URL", "https://beaconcha.in")

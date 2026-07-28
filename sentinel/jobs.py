@@ -46,9 +46,6 @@ class JobContext:
         try:
             self._chain_head = await self._subscription.get_block_number()
             if context is not None:
-                context.bot_storage.block.update(
-                    max(context.bot_storage.block.value, self._chain_head)
-                )
                 context.runtime.health.mark_progress()
             logger.debug("Polled chain head: %s", self._chain_head)
         except Exception as exc:

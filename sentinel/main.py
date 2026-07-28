@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from sentinel.app.bootstrap import create_runtime, run
@@ -20,9 +21,13 @@ def _assert_event_mappings() -> None:
     assert_curated_event_mappings()
 
 
-if __name__ == "__main__":
+async def main() -> None:
     _assert_event_mappings()
-    runtime = create_runtime()
+    runtime = await create_runtime()
     register_handlers(runtime)
     logger.info("Starting CSM bot")
-    run(runtime)
+    await run(runtime)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

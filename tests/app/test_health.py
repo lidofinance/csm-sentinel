@@ -99,6 +99,21 @@ def test_health_state_stale_heartbeat_breaks_liveness():
     assert snapshot.ready is False
 
 
+def test_health_state_is_not_ready_during_catchup():
+    health = HealthState()
+    health.mark_polling_started()
+    health.mark_subscription_active()
+    health.mark_startup_complete()
+
+    health.mark_catchup_started()
+    assert health.snapshot().ready is False
+    assert health.snapshot().catchup_active is True
+
+    health.mark_catchup_complete()
+    assert health.snapshot().ready is True
+    assert health.snapshot().catchup_active is False
+
+
 def test_health_server_reports_status_endpoints():
     health = HealthState()
     build_info = {"version": "v1.2.3", "branch": "main", "commit": "abc123"}

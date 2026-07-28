@@ -1,8 +1,10 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from typing import Any
+from typing import TypeVar
 
-import web3.exceptions
 from web3 import AsyncWeb3
 from web3.types import FilterParams
 
@@ -12,8 +14,7 @@ from sentinel.web3_events import decode_event, log_filter_for_source
 
 logger = logging.getLogger(__name__)
 
-GET_LOGS_RETRY_INITIAL_DELAY_SECONDS = 2.0
-GET_LOGS_RETRY_MAX_DELAY_SECONDS = 60.0
+T = TypeVar("T")
 
 
 class Web3EventLogReader:
@@ -37,11 +38,49 @@ class Web3EventLogReader:
         self._stop_event = stop_event
         self._provider_connected_message = provider_connected_message
 
-    async def connected_w3(self) -> AsyncWeb3:
+    async def connected_w3(self) -> AsyncWeb3 | None:
+        if self._is_stopped():
+            return None
         if not await self._w3.provider.is_connected():
-            await self._w3.provider.connect()
+            stopped, _ = await self._run_or_stop(self._w3.provider.connect)
+            if stopped:
+                return None
             logger.info(self._provider_connected_message)
         return self._w3
+
+    async def _run_or_stop(
+        self,
+        operation: Callable[[], Awaitable[T]],
+    ) -> tuple[bool, T | None]:
+        if self._is_stopped():
+            return True, None
+        if self._stop_event is None:
+            return False, await operation()
+
+        operation_task = asyncio.ensure_future(operation())
+        stop_task = asyncio.create_task(self._stop_event.wait())
+        try:
+            done, _ = await asyncio.wait(
+                {operation_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                if not operation_task.done():
+                    operation_task.cancel()
+                try:
+                    await operation_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.debug("Backfill RPC failed during shutdown", exc_info=True)
+                return True, None
+
+            return False, await operation_task
+        finally:
+            if not stop_task.done():
+                stop_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stop_task
 
     async def fetch_events(
         self,
@@ -50,6 +89,8 @@ class Web3EventLogReader:
         end_block: int,
     ) -> list[Event] | None:
         w3 = await self.connected_w3()
+        if w3 is None:
+            return None
 
         events: list[Event] = []
         for source in self._event_sources:
@@ -59,12 +100,9 @@ class Web3EventLogReader:
             filter_params["fromBlock"] = start_block
             filter_params["toBlock"] = end_block
 
-            logs = await self.get_logs_with_retry(
+            logs = await self.get_logs(
                 w3=w3,
                 filter_params=filter_params,
-                contract=source.address,
-                batch_start=start_block,
-                batch_end=end_block,
             )
             if logs is None:
                 return None
@@ -86,47 +124,20 @@ class Web3EventLogReader:
             key=lambda event: (event.block, event.transaction_index, event.log_index),
         )
 
-    async def get_logs_with_retry(
+    async def get_logs(
         self,
         *,
         w3: AsyncWeb3,
         filter_params: FilterParams,
-        contract: str,
-        batch_start: int,
-        batch_end: int,
     ) -> list[Any] | None:
-        attempt = 1
-        delay_seconds = GET_LOGS_RETRY_INITIAL_DELAY_SECONDS
+        if self._is_stopped() or await self.throttle():
+            return None
 
-        while True:
-            if self._is_stopped():
-                return None
-
-            if await self.throttle():
-                return None
-            try:
-                return await w3.eth.get_logs(filter_params)
-            except web3.exceptions.Web3Exception as exc:
-                if not is_retryable_get_logs_error(exc):
-                    raise
-
-                logger.warning(
-                    "Rate-limited while fetching logs for %s blocks %s-%s (attempt %s). "
-                    "Retrying in %.1fs. Error: %s",
-                    contract,
-                    batch_start,
-                    batch_end,
-                    attempt,
-                    delay_seconds,
-                    exc,
-                )
-                if await self._sleep(delay_seconds):
-                    return None
-                attempt += 1
-                delay_seconds = min(
-                    delay_seconds * 2,
-                    GET_LOGS_RETRY_MAX_DELAY_SECONDS,
-                )
+        stopped, logs = await self._run_or_stop(lambda: w3.eth.get_logs(filter_params))
+        if stopped:
+            return None
+        assert logs is not None
+        return logs
 
     async def throttle(self) -> bool:
         if self._request_interval_seconds is None:
@@ -156,34 +167,3 @@ class Web3EventLogReader:
         except TimeoutError:
             return False
         return True
-
-
-def is_retryable_get_logs_error(exc: web3.exceptions.Web3Exception) -> bool:
-    if not isinstance(exc, web3.exceptions.Web3RPCError):
-        return False
-
-    code: int | None = None
-    message = str(exc).lower()
-
-    rpc_error = exc.rpc_response.get("error") if isinstance(exc.rpc_response, dict) else None
-    if isinstance(rpc_error, dict):
-        maybe_code = rpc_error.get("code")
-        if isinstance(maybe_code, int):
-            code = maybe_code
-        rpc_message = rpc_error.get("message")
-        if isinstance(rpc_message, str):
-            message = f"{message} {rpc_message.lower()}"
-
-    if code in {429, -32005}:
-        return True
-
-    return any(
-        marker in message
-        for marker in (
-            "429",
-            "rate limit",
-            "too many requests",
-            "throughput",
-            "compute units per second",
-        )
-    )
