@@ -33,7 +33,6 @@ from sentinel.rpc_provider import (
 )
 from sentinel.metrics import (
     DEFAULT_METRICS,
-    JobMetricsMiddleware,
     MetricsHTTPXRequest,
     RpcMetricsMiddleware,
 )
@@ -130,20 +129,19 @@ async def create_runtime() -> BotRuntime:
             module_adapter=module_adapter,
             storage=processing_state,
             notification_sink=TelegramNotificationSink(application),
-            observer=DEFAULT_METRICS.chain,
             backfill_w3=backfill_provider,
         )
         notification_handler = TelegramNotificationHandler(
             application,
             lambda: module_supervisor.event_messages,
         )
-        job_context = JobContext(
-            module_supervisor,
-            metrics=JobMetricsMiddleware(DEFAULT_METRICS.jobs),
-        )
+        job_context = JobContext(module_supervisor)
         DEFAULT_METRICS.chain.bind(
             health=health,
             processed_block=lambda: processing_state.state.block.value,
+        )
+        DEFAULT_METRICS.aggregation.bind(
+            lambda: len(processing_state.state.aggregation_windows.pending())
         )
         runtime = BotRuntime(
             application=application,

@@ -1,4 +1,5 @@
-from sentinel.metrics.chain import ChainMetrics, ChainObserver
+from sentinel.metrics.build import BuildInfoMetrics
+from sentinel.metrics.chain import ChainMetrics
 from sentinel.metrics.jobs import JobMetrics, JobMetricsMiddleware, JobObserver
 from sentinel.metrics.registry import DEFAULT_METRICS, AppMetrics
 from sentinel.metrics.rpc import RpcMetrics, RpcMetricsMiddleware, RpcObserver
@@ -6,9 +7,12 @@ from sentinel.metrics.telegram import MetricsHTTPXRequest, TelegramMetrics, Tele
 
 __all__ = (
     "DEFAULT_METRICS",
+    "AggregationMetrics",
+    "AggregationMetricsMiddleware",
+    "AggregationObserver",
     "AppMetrics",
+    "BuildInfoMetrics",
     "ChainMetrics",
-    "ChainObserver",
     "JobMetrics",
     "JobMetricsMiddleware",
     "JobObserver",
@@ -18,4 +22,9 @@ __all__ = (
     "RpcObserver",
     "TelegramMetrics",
     "TelegramObserver",
+)
+from sentinel.metrics.aggregation import (
+    AggregationMetrics,
+    AggregationMetricsMiddleware,
+    AggregationObserver,
 )

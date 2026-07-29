@@ -4,9 +4,14 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from sentinel.models import Event, EventNotification
+from sentinel.metrics.aggregation import (
+    AggregationMetricsMiddleware,
+)
+from sentinel.metrics.registry import DEFAULT_METRICS
 from sentinel.modules.aggregation import AggregationWindow, EventAggregator
 
 logger = logging.getLogger(__name__)
+DEFAULT_AGGREGATION_METRICS = AggregationMetricsMiddleware(DEFAULT_METRICS.aggregation)
 
 
 class BlockProgressStore(Protocol):
@@ -71,6 +76,7 @@ class AggregationCoordinator:
         block_reader: BlockNumberReader,
         notification_sink: NotificationSink,
         aggregators: tuple[EventAggregator, ...],
+        metrics: AggregationMetricsMiddleware = DEFAULT_AGGREGATION_METRICS,
         poll_interval_seconds: float = 12.0,
     ) -> None:
         self._storage = storage
@@ -78,6 +84,7 @@ class AggregationCoordinator:
         self._block_reader = block_reader
         self._notification_sink = notification_sink
         self._poll_interval_seconds = poll_interval_seconds
+        self._metrics = metrics
         self._aggregating_windows: set[AggregationWindow] = set()
         self._pending_tasks: dict[AggregationWindow, asyncio.Task] = {}
         self._aggregators_by_group = {
@@ -92,6 +99,10 @@ class AggregationCoordinator:
     @property
     def _aggregation_windows(self):
         return self._storage.state.aggregation_windows
+
+    @property
+    def pending_window_count(self) -> int:
+        return len(self._aggregation_windows.pending())
 
     async def handle_event(self, event: Event) -> None:
         prepared = await self._prepare(event)
@@ -112,8 +123,9 @@ class AggregationCoordinator:
             self._schedule_window(window, aggregator)
             return PreparedNotifications([])
 
-        return await self._aggregate_window(
-            window, aggregator, fallback_event=event
+        return await self._metrics.run(
+            window.group,
+            lambda: self._aggregate_window(window, aggregator, fallback_event=event),
         ) or PreparedNotifications([])
 
     def resume_pending(self) -> None:
@@ -164,7 +176,10 @@ class AggregationCoordinator:
                 while not await self._window_is_ready(window):
                     await asyncio.sleep(self._poll_interval_seconds)
 
-                prepared = await self._aggregate_window(window, aggregator, fallback_event=None)
+                prepared = await self._metrics.run(
+                    window.group,
+                    lambda: self._aggregate_window(window, aggregator, fallback_event=None),
+                )
                 if prepared is None:
                     await asyncio.sleep(self._poll_interval_seconds)
                     continue

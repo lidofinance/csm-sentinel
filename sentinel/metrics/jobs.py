@@ -21,9 +21,6 @@ class JobObserver:
         pass
 
 
-NOOP_JOB_OBSERVER = JobObserver()
-
-
 class JobMetrics(JobObserver):
     def __init__(self, registry: CollectorRegistry) -> None:
         self.runs = Counter(
@@ -83,6 +80,3 @@ class JobMetricsMiddleware:
                 self._observer.observe(job, outcome, started_at)
 
         return measured
-
-
-NOOP_JOB_MIDDLEWARE = JobMetricsMiddleware(NOOP_JOB_OBSERVER)

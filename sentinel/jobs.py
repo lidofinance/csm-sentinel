@@ -3,7 +3,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from telegram.ext import Application
 
-from sentinel.metrics.jobs import NOOP_JOB_MIDDLEWARE, JobMetricsMiddleware
+from sentinel.metrics.jobs import JobMetricsMiddleware
+from sentinel.metrics.registry import DEFAULT_METRICS
 
 logger = logging.getLogger(__name__)
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
@@ -18,6 +19,7 @@ class ChainHeadReader(Protocol):
 
 CHAIN_HEAD_POLL_INTERVAL_SECONDS = 5 * 60  # 5 minutes
 ALERT_INTERVAL_MINUTES = 30
+DEFAULT_JOB_METRICS = JobMetricsMiddleware(DEFAULT_METRICS.jobs)
 
 
 class JobContext:
@@ -26,10 +28,9 @@ class JobContext:
     def __init__(
         self,
         subscription: ChainHeadReader,
-        metrics: JobMetricsMiddleware = NOOP_JOB_MIDDLEWARE,
     ) -> None:
         self._subscription = subscription
-        self._metrics = metrics
+        self._metrics = DEFAULT_JOB_METRICS
         self._chain_head: int = 0
         self._last_checked_chain_head: int = 0
 

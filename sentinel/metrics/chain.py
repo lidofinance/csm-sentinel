@@ -6,17 +6,7 @@ from sentinel.app.health import HealthState
 from sentinel.metrics.constants import METRICS_NAMESPACE
 
 
-class ChainObserver:
-    """No-op base class for optional chain lifecycle observers."""
-
-    def subscription_recovered(self, reason: str) -> None:
-        pass
-
-
-NOOP_CHAIN_OBSERVER = ChainObserver()
-
-
-class ChainMetrics(ChainObserver):
+class ChainMetrics:
     def __init__(self, registry: CollectorRegistry) -> None:
         self.processed_block = Gauge(
             "processed_block",

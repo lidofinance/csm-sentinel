@@ -15,7 +15,7 @@ from sentinel.chain import SharedChainConnection
 from sentinel.config import Config
 from sentinel.config import set_config
 from sentinel.models import Block, Event
-from sentinel.metrics.chain import NOOP_CHAIN_OBSERVER, ChainObserver
+from sentinel.metrics.registry import DEFAULT_METRICS
 from sentinel.modules.community.adapter import CommunityModuleAdapter
 from sentinel.modules.side_effects import ModuleEventSideEffects
 from sentinel.rpc import Subscription
@@ -147,7 +147,6 @@ class ModuleRuntimeSupervisor:
         module_adapter: "ModuleAdapter",
         storage: ProcessingStateProvider,
         notification_sink: NotificationSink,
-        observer: ChainObserver = NOOP_CHAIN_OBSERVER,
         backfill_w3=None,
     ) -> None:
         self._subscription_w3_factory = subscription_w3_factory
@@ -157,7 +156,6 @@ class ModuleRuntimeSupervisor:
         self._health = health
         self._storage = storage
         self._notification_sink = notification_sink
-        self._observer = observer
         self._shutdown_requested = False
         self._module_runtime_restarted = asyncio.Event()
         self._catchup_until_block: int | None = None
@@ -345,7 +343,7 @@ class ModuleRuntimeSupervisor:
         await previous_runtime.close()
         self._pending_replay_start_block = replay_start_block
         self._install_module_runtime(self._new_module_runtime(previous_runtime.module_adapter))
-        self._observer.subscription_recovered(reason)
+        DEFAULT_METRICS.chain.subscription_recovered(reason)
 
     async def _replay_pending_blocks_after_restart(self) -> None:
         replay_start_block = self._pending_replay_start_block
