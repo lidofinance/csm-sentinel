@@ -46,6 +46,7 @@ def test_provider_uses_bounded_retries_and_safe_endpoint_label():
 
     assert provider._max_connection_retries == DEFAULT_CONNECTION_RETRIES_PER_ENDPOINT
     assert pool.endpoints[0].label == "rpc-1 (rpc.example)"
+    assert pool.endpoints[0].metric_label == "rpc.example"
 
 
 @pytest.mark.asyncio
@@ -59,8 +60,8 @@ async def test_provider_connects_to_fallback_when_primary_is_unavailable(monkeyp
         if endpoint.index == 0:
             raise ProviderConnectionError("primary unavailable")
 
-    monkeypatch.setattr(provider, "_connect_endpoint", connect_endpoint)
-    monkeypatch.setattr(provider, "_disconnect_endpoint", AsyncMock())
+    monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
+    monkeypatch.setattr(provider, "_close_endpoint", AsyncMock())
     monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(return_value=1))
 
     await provider.connect()
@@ -84,7 +85,7 @@ async def test_provider_raises_when_endpoint_chain_differs_from_pool(monkeypatch
 
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
     monkeypatch.setattr(provider, "_close_endpoint", AsyncMock())
-    monkeypatch.setattr(provider, "_read_active_chain_id", AsyncMock(return_value=1))
+    monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(return_value=1))
 
     with pytest.raises(RpcChainMismatch, match="chain ID 1.*chain ID 560048"):
         await provider.validate_endpoint_chain_ids()
@@ -103,7 +104,7 @@ async def test_provider_validates_every_reachable_endpoint_chain(monkeypatch):
 
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
     monkeypatch.setattr(provider, "_close_endpoint", AsyncMock())
-    monkeypatch.setattr(provider, "_read_active_chain_id", AsyncMock(side_effect=[1, 560048]))
+    monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(side_effect=[1, 560048]))
 
     with pytest.raises(RpcChainMismatch, match="chain ID 560048.*chain ID 1"):
         await provider.validate_endpoint_chain_ids()
@@ -130,7 +131,7 @@ async def test_startup_validation_requires_every_endpoint(monkeypatch):
 
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
     monkeypatch.setattr(provider, "_close_endpoint", AsyncMock())
-    monkeypatch.setattr(provider, "_read_active_chain_id", AsyncMock(return_value=1))
+    monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(return_value=1))
 
     with pytest.raises(RpcEndpointsUnavailable, match="rpc-2"):
         await provider.validate_endpoint_chain_ids()
@@ -149,7 +150,7 @@ async def test_too_many_requests_switches_endpoint_without_transport_retry(monke
         attempted.append(endpoint.index)
 
     async def close_endpoint():
-        provider._connection.active_endpoint = None  # noqa: SLF001
+        provider.active_endpoint = None
 
     async def is_connected():
         return provider.active_endpoint is not None
@@ -194,7 +195,7 @@ async def test_connect_does_not_recheck_validated_chain_id(monkeypatch):
     await pool.accept_chain_id(pool.endpoints[1], 1)
     read_chain_id = AsyncMock()
 
-    monkeypatch.setattr(provider, "_connect_endpoint", AsyncMock())
+    monkeypatch.setattr(provider, "_open_endpoint", AsyncMock())
     monkeypatch.setattr(provider, "_read_chain_id", read_chain_id)
 
     await provider.connect()
@@ -219,10 +220,10 @@ async def test_shared_pool_keeps_the_successful_fallback_preferred(monkeypatch):
     async def connect_reads(endpoint):
         reads_attempts.append(endpoint.index)
 
-    monkeypatch.setattr(subscription, "_connect_endpoint", connect_subscription)
-    monkeypatch.setattr(subscription, "_disconnect_endpoint", AsyncMock())
+    monkeypatch.setattr(subscription, "_open_endpoint", connect_subscription)
+    monkeypatch.setattr(subscription, "_close_endpoint", AsyncMock())
     monkeypatch.setattr(subscription, "_read_chain_id", AsyncMock(return_value=1))
-    monkeypatch.setattr(reads, "_connect_endpoint", connect_reads)
+    monkeypatch.setattr(reads, "_open_endpoint", connect_reads)
     monkeypatch.setattr(reads, "_read_chain_id", AsyncMock(return_value=1))
 
     await subscription.connect()
@@ -238,10 +239,10 @@ async def test_provider_raises_after_all_endpoints_fail(monkeypatch):
     provider = _provider(pool)
     monkeypatch.setattr(
         provider,
-        "_connect_endpoint",
+        "_open_endpoint",
         AsyncMock(side_effect=ProviderConnectionError("unavailable")),
     )
-    monkeypatch.setattr(provider, "_disconnect_endpoint", AsyncMock())
+    monkeypatch.setattr(provider, "_close_endpoint", AsyncMock())
 
     with pytest.raises(RpcEndpointsUnavailable, match="All RPC endpoints"):
         await provider.connect()
@@ -261,7 +262,7 @@ async def test_execute_with_failover_retries_transport_failure_on_same_endpoint(
         attempted.append(endpoint.index)
 
     async def disconnect_endpoint():
-        provider._connection.active_endpoint = None  # noqa: SLF001
+        provider.active_endpoint = None
 
     async def is_connected():
         return provider.active_endpoint is not None
@@ -276,7 +277,7 @@ async def test_execute_with_failover_retries_transport_failure_on_same_endpoint(
     monkeypatch.setattr(provider, "is_connected", is_connected)
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
     monkeypatch.setattr(provider, "_close_endpoint", disconnect_endpoint)
-    monkeypatch.setattr(provider, "_read_active_chain_id", AsyncMock(return_value=1))
+    monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(return_value=1))
 
     assert await provider.execute_request(operation, method="eth_call") == "ok"
     assert attempted == [0, 0]
@@ -290,7 +291,7 @@ async def test_execute_with_failover_switches_on_any_rpc_error(monkeypatch, capl
         cooldown_seconds=60,
     )
     provider = _request_provider(pool, role="backfill")
-    provider._connection.active_endpoint = pool.endpoints[0]  # noqa: SLF001
+    provider.active_endpoint = pool.endpoints[0]
     await pool.mark_success(pool.endpoints[0])
     attempted: list[int] = []
     operation_calls = 0
@@ -299,7 +300,7 @@ async def test_execute_with_failover_switches_on_any_rpc_error(monkeypatch, capl
         attempted.append(endpoint.index)
 
     async def disconnect_endpoint():
-        provider._connection.active_endpoint = None  # noqa: SLF001
+        provider.active_endpoint = None
 
     async def is_connected():
         return provider.active_endpoint is not None
@@ -317,7 +318,7 @@ async def test_execute_with_failover_switches_on_any_rpc_error(monkeypatch, capl
     monkeypatch.setattr(provider, "is_connected", is_connected)
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
     monkeypatch.setattr(provider, "_close_endpoint", disconnect_endpoint)
-    monkeypatch.setattr(provider, "_read_active_chain_id", AsyncMock(return_value=1))
+    monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(return_value=1))
 
     assert (
         await provider.execute_request(
@@ -338,7 +339,7 @@ async def test_rpc_error_log_redacts_url_secrets(monkeypatch, caplog):
     provider = _request_provider(pool, role="reads")
 
     async def close_endpoint():
-        provider._connection.active_endpoint = None  # noqa: SLF001
+        provider.active_endpoint = None
 
     async def is_connected():
         return provider.active_endpoint is not None
@@ -376,14 +377,14 @@ async def test_rpc_error_log_redacts_url_secrets(monkeypatch, caplog):
 async def test_execute_with_failover_raises_after_every_endpoint_rejects(monkeypatch):
     pool = RpcEndpointPool(("ws://primary.invalid", "ws://fallback.invalid"))
     provider = _request_provider(pool, role="reads")
-    provider._connection.active_endpoint = pool.endpoints[0]  # noqa: SLF001
+    provider.active_endpoint = pool.endpoints[0]
     attempted: list[int] = []
 
     async def connect_endpoint(endpoint):
         attempted.append(endpoint.index)
 
     async def disconnect_endpoint():
-        provider._connection.active_endpoint = None  # noqa: SLF001
+        provider.active_endpoint = None
 
     async def is_connected():
         return provider.active_endpoint is not None
@@ -397,7 +398,7 @@ async def test_execute_with_failover_raises_after_every_endpoint_rejects(monkeyp
     monkeypatch.setattr(provider, "is_connected", is_connected)
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
     monkeypatch.setattr(provider, "_close_endpoint", disconnect_endpoint)
-    monkeypatch.setattr(provider, "_read_active_chain_id", AsyncMock(return_value=1))
+    monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(return_value=1))
 
     with pytest.raises(RpcRequestRejectedByAllProviders) as raised:
         await provider.execute_request(operation, method="eth_getLogs")
@@ -418,7 +419,7 @@ async def test_execute_with_failover_does_not_wait_forever_for_remaining_endpoin
         max_connection_rounds=-1,
         retry_interval_seconds=0,
     )
-    provider._connection.active_endpoint = pool.endpoints[0]  # noqa: SLF001
+    provider.active_endpoint = pool.endpoints[0]
     attempted: list[int] = []
 
     async def connect_endpoint(endpoint):
@@ -426,7 +427,7 @@ async def test_execute_with_failover_does_not_wait_forever_for_remaining_endpoin
         raise ProviderConnectionError("fallback unavailable")
 
     async def disconnect_endpoint():
-        provider._connection.active_endpoint = None  # noqa: SLF001
+        provider.active_endpoint = None
 
     monkeypatch.setattr(provider, "is_connected", AsyncMock(return_value=True))
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
@@ -448,7 +449,7 @@ async def test_execute_with_failover_does_not_wait_forever_for_remaining_endpoin
 async def test_execute_with_failover_propagates_semantic_web3_exception(monkeypatch):
     pool = RpcEndpointPool(("ws://primary.invalid", "ws://fallback.invalid"))
     provider = _request_provider(pool, role="reads")
-    provider._connection.active_endpoint = pool.endpoints[0]  # noqa: SLF001
+    provider.active_endpoint = pool.endpoints[0]
     disconnect = AsyncMock()
 
     monkeypatch.setattr(provider, "is_connected", AsyncMock(return_value=True))
@@ -467,7 +468,7 @@ async def test_execute_with_failover_propagates_semantic_web3_exception(monkeypa
 async def test_execute_with_failover_preserves_block_not_found(monkeypatch):
     pool = RpcEndpointPool(("ws://primary.invalid", "ws://fallback.invalid"))
     provider = _request_provider(pool, role="reads")
-    provider._connection.active_endpoint = pool.endpoints[0]  # noqa: SLF001
+    provider.active_endpoint = pool.endpoints[0]
     disconnect = AsyncMock()
     error = BlockNotFound("missing block")
 
@@ -538,8 +539,8 @@ async def test_concurrent_capacity_failures_do_not_disconnect_new_endpoint(monke
         cooldown_seconds=60,
     )
     provider = _request_provider(pool, role="reads")
-    provider._connection.active_endpoint = pool.endpoints[0]  # noqa: SLF001
-    provider._connection.connection_generation = 1  # noqa: SLF001
+    provider.active_endpoint = pool.endpoints[0]
+    provider.connection_generation = 1
     await pool.mark_success(pool.endpoints[0])
     attempted: list[int] = []
     operation_calls = 0
@@ -549,7 +550,7 @@ async def test_concurrent_capacity_failures_do_not_disconnect_new_endpoint(monke
         attempted.append(endpoint.index)
 
     async def disconnect_endpoint():
-        provider._connection.active_endpoint = None  # noqa: SLF001
+        provider.active_endpoint = None
 
     async def is_connected():
         return provider.active_endpoint is not None
@@ -570,7 +571,7 @@ async def test_concurrent_capacity_failures_do_not_disconnect_new_endpoint(monke
     monkeypatch.setattr(provider, "is_connected", is_connected)
     monkeypatch.setattr(provider, "_open_endpoint", connect_endpoint)
     monkeypatch.setattr(provider, "_close_endpoint", disconnect_endpoint)
-    monkeypatch.setattr(provider, "_read_active_chain_id", AsyncMock(return_value=1))
+    monkeypatch.setattr(provider, "_read_chain_id", AsyncMock(return_value=1))
 
     first, second = await asyncio.gather(
         provider.execute_request(operation, method="eth_getLogs"),

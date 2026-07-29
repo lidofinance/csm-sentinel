@@ -24,6 +24,8 @@ from web3.manager import RequestManager
 from web3.providers.async_base import AsyncJSONBaseProvider
 from websockets.exceptions import WebSocketException
 
+from sentinel.metrics.rpc import NOOP_RPC_OBSERVER, RpcObserver
+
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
 DEFAULT_CONNECTION_RETRIES_PER_ENDPOINT = 5
@@ -63,6 +65,10 @@ class RpcChainMismatch(RpcConfigurationError):
 class RpcEndpoint:
     index: int
     uri: str
+
+    @property
+    def metric_label(self) -> str:
+        return urlsplit(self.uri).hostname or f"rpc-{self.index + 1}"
 
     @property
     def label(self) -> str:
@@ -300,8 +306,8 @@ class RpcEndpointPool:
                 )
 
 
-class _RpcConnectionController:
-    """Shared endpoint selection and connection lifecycle for RPC adapters."""
+class FallbackConnectionBase:
+    """Shared endpoint selection and connection lifecycle for fallback providers."""
 
     def __init__(
         self,
@@ -310,10 +316,7 @@ class _RpcConnectionController:
         role: str,
         max_connection_rounds: int,
         retry_interval_seconds: float,
-        open_endpoint: Callable[[RpcEndpoint], Awaitable[None]],
-        read_chain_id: Callable[[], Awaitable[int]],
-        close_endpoint: Callable[[], Awaitable[None]],
-        is_connected: Callable[[], Awaitable[bool]],
+        observer: RpcObserver,
     ) -> None:
         if max_connection_rounds == 0 or max_connection_rounds < -1:
             raise ValueError("max_connection_rounds must be -1 or a positive integer")
@@ -323,10 +326,7 @@ class _RpcConnectionController:
         self.retry_interval_seconds = retry_interval_seconds
         self.active_endpoint: RpcEndpoint | None = None
         self.connection_generation = 0
-        self._open_endpoint = open_endpoint
-        self._read_chain_id = read_chain_id
-        self._close_endpoint = close_endpoint
-        self._is_connected = is_connected
+        self._observer = observer
         self._connect_lock = asyncio.Lock()
         self._failover_lock = asyncio.Lock()
 
@@ -347,7 +347,12 @@ class _RpcConnectionController:
                         endpoint.label,
                     )
                     raise
-                except _RPC_ENDPOINT_FAILURES:
+                except _RPC_ENDPOINT_FAILURES as exc:
+                    self._observer.endpoint_failed(
+                        self.role,
+                        endpoint.metric_label,
+                        _failure_summary(endpoint, exc).kind.value,
+                    )
                     logger.error(
                         "%s endpoint %s is unavailable during startup validation",
                         self.role,
@@ -371,7 +376,7 @@ class _RpcConnectionController:
                 f"RPC endpoints unavailable during startup validation: {labels}"
             )
 
-    async def connect(
+    async def _connect_with_fallback(
         self,
         *,
         excluded_indices: frozenset[int] = frozenset(),
@@ -385,8 +390,9 @@ class _RpcConnectionController:
             if self.active_endpoint is not None:
                 if self.active_endpoint.index in excluded_indices:
                     self.active_endpoint = None
+                    self._observer.endpoint_disconnected(self.role)
                     await self._close_safely()
-                elif await self._is_connected():
+                elif await self.is_connected():
                     return
 
             completed_rounds = 0
@@ -407,7 +413,12 @@ class _RpcConnectionController:
                         await self._open_endpoint(endpoint)
                     except asyncio.CancelledError:
                         raise
-                    except _RPC_ENDPOINT_FAILURES:
+                    except _RPC_ENDPOINT_FAILURES as exc:
+                        self._observer.endpoint_failed(
+                            self.role,
+                            endpoint.metric_label,
+                            _failure_summary(endpoint, exc).kind.value,
+                        )
                         logger.warning(
                             "%s endpoint %s is unavailable",
                             self.role,
@@ -420,6 +431,7 @@ class _RpcConnectionController:
                     self.active_endpoint = endpoint
                     self.connection_generation += 1
                     await self.pool.mark_success(endpoint)
+                    self._observer.endpoint_connected(self.role, endpoint.metric_label)
                     logger.info(
                         "%s connected through %s (generation %s)",
                         self.role,
@@ -435,9 +447,10 @@ class _RpcConnectionController:
 
             raise RpcEndpointsUnavailable(f"All RPC endpoints are unavailable for {self.role}")
 
-    async def disconnect(self) -> None:
+    async def _disconnect_with_fallback(self) -> None:
         async with self._connect_lock:
             self.active_endpoint = None
+            self._observer.endpoint_disconnected(self.role)
             try:
                 await self._close_endpoint()
             except _RPC_ENDPOINT_FAILURES:
@@ -445,7 +458,7 @@ class _RpcConnectionController:
                     f"Failed to disconnect active {self.role} RPC endpoint"
                 ) from None
 
-    async def invalidate(
+    async def _invalidate_endpoint(
         self,
         endpoint: RpcEndpoint,
         generation: int,
@@ -464,14 +477,27 @@ class _RpcConnectionController:
                         endpoint.label,
                     )
                 self.active_endpoint = None
+                self._observer.endpoint_disconnected(self.role)
                 await self._close_safely()
 
     async def _close_safely(self) -> None:
         with suppress(*_RPC_ENDPOINT_FAILURES):
             await self._close_endpoint()
 
+    async def _open_endpoint(self, endpoint: RpcEndpoint) -> None:
+        raise NotImplementedError
 
-class FallbackRequestProvider(AsyncJSONBaseProvider):
+    async def _read_chain_id(self) -> int:
+        raise NotImplementedError
+
+    async def _close_endpoint(self) -> None:
+        raise NotImplementedError
+
+    async def is_connected(self, show_traceback: bool = False) -> bool:
+        raise NotImplementedError
+
+
+class FallbackRequestProvider(AsyncJSONBaseProvider, FallbackConnectionBase):
     """Non-persistent Web3 facade over independent persistent RPC transports."""
 
     def __init__(
@@ -482,13 +508,21 @@ class FallbackRequestProvider(AsyncJSONBaseProvider):
         max_connection_rounds: int = -1,
         retry_interval_seconds: float = 1.0,
         max_connection_retries: int = DEFAULT_CONNECTION_RETRIES_PER_ENDPOINT,
+        observer: RpcObserver = NOOP_RPC_OBSERVER,
     ) -> None:
         if max_connection_retries < 1:
             raise ValueError("max_connection_retries must be a positive integer")
 
         super().__init__()
-        self.pool = pool
-        self.role = role
+        FallbackConnectionBase.__init__(
+            self,
+            pool,
+            role=role,
+            max_connection_rounds=max_connection_rounds,
+            retry_interval_seconds=retry_interval_seconds,
+            observer=observer,
+        )
+        self.observer = observer
         self._active_transport: WebSocketProvider | None = None
         self._transports = tuple(
             WebSocketProvider(
@@ -500,37 +534,16 @@ class FallbackRequestProvider(AsyncJSONBaseProvider):
         self._transport_web3s = tuple(
             AsyncWeb3(transport, middleware=[]) for transport in self._transports
         )
-        self._connection = _RpcConnectionController(
-            pool,
-            role=role,
-            max_connection_rounds=max_connection_rounds,
-            retry_interval_seconds=retry_interval_seconds,
-            open_endpoint=lambda endpoint: self._open_endpoint(endpoint),
-            read_chain_id=lambda: self._read_active_chain_id(),
-            close_endpoint=lambda: self._close_endpoint(),
-            is_connected=lambda: self.is_connected(),
-        )
-
-    @property
-    def active_endpoint(self) -> RpcEndpoint | None:
-        return self._connection.active_endpoint
-
-    @property
-    def connection_generation(self) -> int:
-        return self._connection.connection_generation
 
     @property
     def active_endpoint_label(self) -> str:
         return "not-connected" if self.active_endpoint is None else self.active_endpoint.label
 
-    async def validate_endpoint_chain_ids(self) -> None:
-        await self._connection.validate_endpoint_chain_ids()
-
     async def connect(self) -> None:
-        await self._connection.connect()
+        await self._connect_with_fallback()
 
     async def disconnect(self) -> None:
-        await self._connection.disconnect()
+        await self._disconnect_with_fallback()
 
     async def is_connected(self, show_traceback: bool = False) -> bool:
         del show_traceback
@@ -560,7 +573,7 @@ class FallbackRequestProvider(AsyncJSONBaseProvider):
         transport_retried_indices: set[int] = set()
 
         while True:
-            await self._connection.connect(
+            await self._connect_with_fallback(
                 excluded_indices=frozenset(rejected_indices),
                 max_rounds=1 if rejected_indices else None,
             )
@@ -571,12 +584,13 @@ class FallbackRequestProvider(AsyncJSONBaseProvider):
                 return await _invoke_rpc_operation(operation, endpoint)
             except _RpcOperationFailed as exc:
                 failure = exc.failure
+                self.observer.endpoint_failed(self.role, endpoint.metric_label, failure.kind.value)
                 if failure.kind is RpcFailureKind.TRANSPORT:
                     already_retried = endpoint.index in transport_retried_indices
                     transport_retried_indices.add(endpoint.index)
                     if already_retried:
                         rejected_indices.add(endpoint.index)
-                    await self._connection.invalidate(
+                    await self._invalidate_endpoint(
                         endpoint,
                         generation,
                         cooldown=already_retried,
@@ -597,7 +611,7 @@ class FallbackRequestProvider(AsyncJSONBaseProvider):
                     failure.rpc_code,
                     exc.log_message,
                 )
-                await self._connection.invalidate(
+                await self._invalidate_endpoint(
                     endpoint,
                     generation,
                     cooldown=False,
@@ -613,7 +627,7 @@ class FallbackRequestProvider(AsyncJSONBaseProvider):
         self._active_transport = self._transports[endpoint.index]
         await self._active_transport.connect()
 
-    async def _read_active_chain_id(self) -> int:
+    async def _read_chain_id(self) -> int:
         endpoint = self.active_endpoint
         if endpoint is None:
             transport = self._active_transport
@@ -642,7 +656,7 @@ class FallbackRequestProvider(AsyncJSONBaseProvider):
         raise ProviderConnectionError("RPC endpoint returned an invalid eth_chainId response")
 
 
-class FallbackSubscriptionProvider(WebSocketProvider):
+class FallbackSubscriptionProvider(WebSocketProvider, FallbackConnectionBase):
     def __init__(
         self,
         pool: RpcEndpointPool,
@@ -650,6 +664,7 @@ class FallbackSubscriptionProvider(WebSocketProvider):
         role: str,
         max_connection_rounds: int = -1,
         retry_interval_seconds: float = 1.0,
+        observer: RpcObserver = NOOP_RPC_OBSERVER,
         **kwargs,
     ) -> None:
         max_connection_retries = kwargs.pop(
@@ -657,31 +672,20 @@ class FallbackSubscriptionProvider(WebSocketProvider):
         )
         if max_connection_retries < 1:
             raise ValueError("max_connection_retries must be a positive integer")
-        self.pool = pool
-        self.role = role
+        self.observer = observer
         super().__init__(
             endpoint_uri=pool.endpoints[0].uri,
             max_connection_retries=max_connection_retries,
             **kwargs,
         )
-        self._connection = _RpcConnectionController(
+        FallbackConnectionBase.__init__(
+            self,
             pool,
             role=role,
             max_connection_rounds=max_connection_rounds,
             retry_interval_seconds=retry_interval_seconds,
-            open_endpoint=lambda endpoint: self._connect_endpoint(endpoint),
-            read_chain_id=lambda: self._read_chain_id(),
-            close_endpoint=lambda: self._disconnect_endpoint(),
-            is_connected=lambda: self.is_connected(),
+            observer=observer,
         )
-
-    @property
-    def active_endpoint(self) -> RpcEndpoint | None:
-        return self._connection.active_endpoint
-
-    @property
-    def connection_generation(self) -> int:
-        return self._connection.connection_generation
 
     def __str__(self) -> str:
         return f"Fallback WebSocket connection ({self.role}, {self.active_endpoint_label})"
@@ -709,7 +713,7 @@ class FallbackSubscriptionProvider(WebSocketProvider):
         return f"{self.role}:{self.active_endpoint_label}"
 
     async def connect(self) -> None:
-        await self._connection.connect()
+        await self._connect_with_fallback()
 
     async def execute_subscription(
         self,
@@ -725,6 +729,8 @@ class FallbackSubscriptionProvider(WebSocketProvider):
             return await _invoke_rpc_operation(operation, endpoint)
         except _RpcOperationFailed as exc:
             failure = exc.failure
+            self.observer.endpoint_failed(self.role, endpoint.metric_label, failure.kind.value)
+            self.observer.persistent_request_failed(self.role, str(method), failure.kind.value)
             rejected = failure.kind is RpcFailureKind.RPC_REJECTED
             if rejected:
                 logger.warning(
@@ -736,7 +742,7 @@ class FallbackSubscriptionProvider(WebSocketProvider):
                     exc.log_message,
                 )
             cooldown = rejected or await self.pool.record_subscription_transport_failure(endpoint)
-            await self._connection.invalidate(
+            await self._invalidate_endpoint(
                 endpoint,
                 generation,
                 cooldown=cooldown,
@@ -744,15 +750,15 @@ class FallbackSubscriptionProvider(WebSocketProvider):
             )
             raise RpcSubscriptionReconnectRequired(method, failure) from None
 
-    async def _connect_endpoint(self, endpoint: RpcEndpoint) -> None:
+    async def _open_endpoint(self, endpoint: RpcEndpoint) -> None:
         self.endpoint_uri = URI(endpoint.uri)
         await super().connect()
 
-    async def _disconnect_endpoint(self) -> None:
+    async def _close_endpoint(self) -> None:
         await super().disconnect()
 
     async def disconnect(self) -> None:
-        await self._connection.disconnect()
+        await self._disconnect_with_fallback()
 
     async def _read_chain_id(self) -> int:
         response = await super().make_request(RPCEndpoint("eth_chainId"), [])

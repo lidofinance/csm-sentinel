@@ -8,6 +8,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
 from sentinel.app.build_info import load_build_info
 
 logger = logging.getLogger(__name__)
@@ -218,6 +220,10 @@ class HealthServer:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
+                if self.path == "/metrics":
+                    self._send_metrics()
+                    return
+
                 if self.path == "/build-info.json":
                     self._send_json(HTTPStatus.OK, build_info)
                     return
@@ -260,6 +266,15 @@ class HealthServer:
                         ),
                     },
                 )
+
+            def _send_metrics(self) -> None:
+                payload = generate_latest()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", CONTENT_TYPE_LATEST)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
 
             def _send_json(self, status: HTTPStatus, body: dict) -> None:
                 payload = json.dumps(body).encode()

@@ -11,6 +11,7 @@ dependencies = [
     "tqdm>=4.66.5",
     "aiogram>=3.12.0",
     "async-lru>=2.0.5",
+    "prometheus-client>=0.25.0",
 ]
 
 [tool.uv]

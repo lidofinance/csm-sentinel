@@ -2,6 +2,8 @@ import json
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
+from prometheus_client import CONTENT_TYPE_LATEST
+
 from sentinel.app.health import (
     HealthServer,
     HealthState,
@@ -132,6 +134,14 @@ def test_health_server_reports_status_endpoints():
             assert response.status == 200
             assert response.headers["Cache-Control"] == "no-store"
             assert json.loads(response.read()) == build_info
+
+        with urlopen(f"{base_url}/metrics", timeout=1) as response:
+            payload = response.read()
+            assert response.status == 200
+            assert response.headers["Content-Type"] == CONTENT_TYPE_LATEST
+            assert response.headers["Cache-Control"] == "no-store"
+            assert response.headers["Content-Length"] == str(len(payload))
+            assert b"# TYPE python_info gauge\n" in payload
 
         health.mark_polling_started()
         health.mark_subscription_active()

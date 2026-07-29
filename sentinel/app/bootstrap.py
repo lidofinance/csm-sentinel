@@ -31,6 +31,7 @@ from sentinel.rpc_provider import (
     FallbackSubscriptionProvider,
     RpcEndpointPool,
 )
+from sentinel.metrics import DEFAULT_METRICS, RpcMetricsMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,16 @@ async def create_runtime() -> BotRuntime:
     heartbeat_task = asyncio.create_task(health.heartbeat_loop())
 
     rpc_endpoint_pool = RpcEndpointPool(env_cfg.web3_socket_providers)
-    reads_provider = FallbackRequestProvider(rpc_endpoint_pool, role="reads")
-    backfill_ws_provider = FallbackRequestProvider(rpc_endpoint_pool, role="backfill")
+    reads_provider = FallbackRequestProvider(
+        rpc_endpoint_pool, role="reads", observer=DEFAULT_METRICS.rpc
+    )
+    backfill_ws_provider = FallbackRequestProvider(
+        rpc_endpoint_pool, role="backfill", observer=DEFAULT_METRICS.rpc
+    )
     rpc_provider = FallbackAsyncWeb3(reads_provider)
+    rpc_provider.middleware_onion.inject(RpcMetricsMiddleware, layer=0)
     backfill_provider = FallbackAsyncWeb3(backfill_ws_provider)
+    backfill_provider.middleware_onion.inject(RpcMetricsMiddleware, layer=0)
     subscription_provider: FallbackSubscriptionProvider | None = None
 
     def create_subscription_w3() -> FallbackAsyncWeb3:
@@ -71,8 +78,11 @@ async def create_runtime() -> BotRuntime:
         subscription_provider = FallbackSubscriptionProvider(
             rpc_endpoint_pool,
             role="subscription",
+            observer=DEFAULT_METRICS.rpc,
         )
-        return FallbackAsyncWeb3(subscription_provider)
+        subscription_w3 = FallbackAsyncWeb3(subscription_provider)
+        subscription_w3.middleware_onion.inject(RpcMetricsMiddleware, layer=0)
+        return subscription_w3
 
     try:
         await reads_provider.validate_endpoint_chain_ids()
