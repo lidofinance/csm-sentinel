@@ -1,3 +1,4 @@
+from sentinel.metrics.chain import ChainMetrics, ChainObserver
 from sentinel.metrics.jobs import JobMetrics, JobMetricsMiddleware, JobObserver
 from sentinel.metrics.registry import DEFAULT_METRICS, AppMetrics
 from sentinel.metrics.rpc import RpcMetrics, RpcMetricsMiddleware, RpcObserver
@@ -6,6 +7,8 @@ from sentinel.metrics.telegram import MetricsHTTPXRequest, TelegramMetrics, Tele
 __all__ = (
     "DEFAULT_METRICS",
     "AppMetrics",
+    "ChainMetrics",
+    "ChainObserver",
     "JobMetrics",
     "JobMetricsMiddleware",
     "JobObserver",

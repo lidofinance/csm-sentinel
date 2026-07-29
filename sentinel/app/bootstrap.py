@@ -121,14 +121,16 @@ async def create_runtime() -> BotRuntime:
         chain = SharedChainConnection(rpc_provider)
         module_adapter = build_module_adapter_from_config(cfg, rpc_provider, chain)
 
+        processing_state = TelegramProcessingStateProvider(application)
         module_supervisor = ModuleRuntimeSupervisor(
             create_subscription_w3,
             config=cfg,
             chain=chain,
             health=health,
             module_adapter=module_adapter,
-            storage=TelegramProcessingStateProvider(application),
+            storage=processing_state,
             notification_sink=TelegramNotificationSink(application),
+            observer=DEFAULT_METRICS.chain,
             backfill_w3=backfill_provider,
         )
         notification_handler = TelegramNotificationHandler(
@@ -138,6 +140,10 @@ async def create_runtime() -> BotRuntime:
         job_context = JobContext(
             module_supervisor,
             metrics=JobMetricsMiddleware(DEFAULT_METRICS.jobs),
+        )
+        DEFAULT_METRICS.chain.bind(
+            health=health,
+            processed_block=lambda: processing_state.state.block.value,
         )
         runtime = BotRuntime(
             application=application,

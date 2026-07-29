@@ -1,5 +1,6 @@
 from prometheus_client import REGISTRY, CollectorRegistry
 
+from sentinel.metrics.chain import ChainMetrics
 from sentinel.metrics.jobs import JobMetrics
 from sentinel.metrics.rpc import RpcMetrics
 from sentinel.metrics.telegram import TelegramMetrics
@@ -10,6 +11,7 @@ class AppMetrics:
 
     def __init__(self, registry: CollectorRegistry = REGISTRY) -> None:
         self.registry = registry
+        self.chain = ChainMetrics(registry)
         self.jobs = JobMetrics(registry)
         self.rpc = RpcMetrics(registry)
         self.telegram = TelegramMetrics(registry)

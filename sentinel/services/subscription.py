@@ -15,6 +15,7 @@ from sentinel.chain import SharedChainConnection
 from sentinel.config import Config
 from sentinel.config import set_config
 from sentinel.models import Block, Event
+from sentinel.metrics.chain import NOOP_CHAIN_OBSERVER, ChainObserver
 from sentinel.modules.community.adapter import CommunityModuleAdapter
 from sentinel.modules.side_effects import ModuleEventSideEffects
 from sentinel.rpc import Subscription
@@ -146,6 +147,7 @@ class ModuleRuntimeSupervisor:
         module_adapter: "ModuleAdapter",
         storage: ProcessingStateProvider,
         notification_sink: NotificationSink,
+        observer: ChainObserver = NOOP_CHAIN_OBSERVER,
         backfill_w3=None,
     ) -> None:
         self._subscription_w3_factory = subscription_w3_factory
@@ -155,6 +157,7 @@ class ModuleRuntimeSupervisor:
         self._health = health
         self._storage = storage
         self._notification_sink = notification_sink
+        self._observer = observer
         self._shutdown_requested = False
         self._module_runtime_restarted = asyncio.Event()
         self._catchup_until_block: int | None = None
@@ -320,10 +323,15 @@ class ModuleRuntimeSupervisor:
             return True
         if self._shutdown_requested:
             return False
-        await self._restart_after_rpc_disconnect(RuntimeError("Subscription stopped unexpectedly"))
+        await self._restart_after_rpc_disconnect(
+            RuntimeError("Subscription stopped unexpectedly"),
+            reason="listener_stopped",
+        )
         return True
 
-    async def _restart_after_rpc_disconnect(self, exc: BaseException) -> None:
+    async def _restart_after_rpc_disconnect(
+        self, exc: BaseException, *, reason: str = "rpc_disconnect"
+    ) -> None:
         previous_runtime = self.module_runtime
         replay_start_block = max(self._storage.state.block.value, 1)
         logger.warning(
@@ -337,6 +345,7 @@ class ModuleRuntimeSupervisor:
         await previous_runtime.close()
         self._pending_replay_start_block = replay_start_block
         self._install_module_runtime(self._new_module_runtime(previous_runtime.module_adapter))
+        self._observer.subscription_recovered(reason)
 
     async def _replay_pending_blocks_after_restart(self) -> None:
         replay_start_block = self._pending_replay_start_block
