@@ -31,7 +31,12 @@ from sentinel.rpc_provider import (
     FallbackSubscriptionProvider,
     RpcEndpointPool,
 )
-from sentinel.metrics import DEFAULT_METRICS, RpcMetricsMiddleware
+from sentinel.metrics import (
+    DEFAULT_METRICS,
+    JobMetricsMiddleware,
+    MetricsHTTPXRequest,
+    RpcMetricsMiddleware,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,7 @@ async def create_runtime() -> BotRuntime:
             ApplicationBuilder()
             .application_class(SentinelApplication)
             .token(cfg.token)
+            .request(MetricsHTTPXRequest(DEFAULT_METRICS.telegram))
             .context_types(context_types)
             .persistence(persistence)
             .rate_limiter(AIORateLimiter(max_retries=5))
@@ -129,8 +135,10 @@ async def create_runtime() -> BotRuntime:
             application,
             lambda: module_supervisor.event_messages,
         )
-        job_context = JobContext(module_supervisor)
-
+        job_context = JobContext(
+            module_supervisor,
+            metrics=JobMetricsMiddleware(DEFAULT_METRICS.jobs),
+        )
         runtime = BotRuntime(
             application=application,
             module_supervisor=module_supervisor,
