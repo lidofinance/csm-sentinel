@@ -3,6 +3,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from telegram.ext import Application
 
+from sentinel.app.secrets import (
+    SECRET_WATCH_INTERVAL_SECONDS,
+    SecretBundle,
+    read_secret_version,
+)
 from sentinel.metrics.jobs import JobMetricsMiddleware
 from sentinel.metrics.registry import DEFAULT_METRICS
 
@@ -28,8 +33,11 @@ class JobContext:
     def __init__(
         self,
         subscription: ChainHeadReader,
+        *,
+        secret_bundle: SecretBundle | None = None,
     ) -> None:
         self._subscription = subscription
+        self._secret_bundle = secret_bundle
         self._metrics = DEFAULT_JOB_METRICS
         self._chain_head: int = 0
         self._last_checked_chain_head: int = 0
@@ -49,6 +57,34 @@ class JobContext:
             interval=CHAIN_HEAD_POLL_INTERVAL_SECONDS,
             first=0,
         )
+        if self._secret_bundle is not None:
+            app.job_queue.run_repeating(
+                self._metrics.wrap("secret_rotation_check", self._check_secret_rotation),
+                interval=SECRET_WATCH_INTERVAL_SECONDS,
+                first=SECRET_WATCH_INTERVAL_SECONDS,
+            )
+
+    async def _check_secret_rotation(self, context: "BotContext") -> bool:
+        bundle = self._secret_bundle
+        if bundle is None:
+            return True
+        try:
+            version = read_secret_version(bundle.path)
+        except (OSError, RuntimeError, ValueError):
+            logger.warning("Failed to read updated secret bundle", exc_info=True)
+            return False
+        if version == bundle.version:
+            return True
+
+        logger.info(
+            "Secret bundle version changed from %s to %s; restarting",
+            bundle.version,
+            version,
+        )
+        supervisor = context.runtime.module_supervisor
+        supervisor.request_shutdown()
+        await supervisor.raw_subscription.stop()
+        return True
 
     async def _poll_chain_head(self, context: "BotContext"):
         try:

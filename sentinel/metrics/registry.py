@@ -6,6 +6,7 @@ from sentinel.metrics.chain import ChainMetrics
 from sentinel.metrics.http import HttpMetrics
 from sentinel.metrics.jobs import JobMetrics
 from sentinel.metrics.rpc import RpcMetrics
+from sentinel.metrics.secrets import SecretMetrics
 from sentinel.metrics.telegram import TelegramMetrics
 
 
@@ -20,6 +21,7 @@ class AppMetrics:
         self.http = HttpMetrics(registry)
         self.jobs = JobMetrics(registry)
         self.rpc = RpcMetrics(registry)
+        self.secrets = SecretMetrics(registry)
         self.telegram = TelegramMetrics(registry)
 
 

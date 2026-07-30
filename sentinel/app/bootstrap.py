@@ -12,6 +12,7 @@ from sentinel.app.context import BotContext
 from sentinel.app.health import HealthServer, HealthState
 from sentinel.app.module_adapter import build_module_adapter_from_config
 from sentinel.app.runtime import BotRuntime
+from sentinel.app.secrets import load_environment_files
 from sentinel.app.storage import create_persistence
 from sentinel.app.telegram_adapters import (
     TelegramNotificationHandler,
@@ -55,7 +56,9 @@ def _resolve_backfill_start_block(
 
 
 async def create_runtime() -> BotRuntime:
+    secret_bundle = load_environment_files()
     env_cfg = load_config_from_env()
+    DEFAULT_METRICS.secrets.set_version(None if secret_bundle is None else secret_bundle.version)
     health = HealthState()
     health_server = HealthServer(
         health,
@@ -148,7 +151,7 @@ async def create_runtime() -> BotRuntime:
             application,
             lambda: module_supervisor.event_messages,
         )
-        job_context = JobContext(module_supervisor)
+        job_context = JobContext(module_supervisor, secret_bundle=secret_bundle)
         DEFAULT_METRICS.chain.bind(
             health=health,
             processed_block=lambda: processing_state.state.block.value,
@@ -156,6 +159,7 @@ async def create_runtime() -> BotRuntime:
         DEFAULT_METRICS.aggregation.bind(
             lambda: len(processing_state.state.aggregation_windows.pending())
         )
+
         runtime = BotRuntime(
             application=application,
             module_supervisor=module_supervisor,

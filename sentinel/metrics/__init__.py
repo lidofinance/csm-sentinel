@@ -4,6 +4,7 @@ from sentinel.metrics.http import HttpMetrics, HttpMetricsMiddleware
 from sentinel.metrics.jobs import JobMetrics, JobMetricsMiddleware, JobObserver
 from sentinel.metrics.registry import DEFAULT_METRICS, AppMetrics
 from sentinel.metrics.rpc import RpcMetrics, RpcMetricsMiddleware, RpcObserver
+from sentinel.metrics.secrets import SecretMetrics
 from sentinel.metrics.telegram import MetricsHTTPXRequest, TelegramMetrics, TelegramObserver
 
 __all__ = (
@@ -23,6 +24,7 @@ __all__ = (
     "RpcMetrics",
     "RpcMetricsMiddleware",
     "RpcObserver",
+    "SecretMetrics",
     "TelegramMetrics",
     "TelegramObserver",
 )
