@@ -76,9 +76,9 @@ async def create_runtime() -> BotRuntime:
         rpc_endpoint_pool, role="backfill", observer=DEFAULT_METRICS.rpc
     )
     rpc_provider = FallbackAsyncWeb3(reads_provider)
-    rpc_provider.middleware_onion.inject(RpcMetricsMiddleware, layer=0)
+    rpc_provider.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
     backfill_provider = FallbackAsyncWeb3(backfill_ws_provider)
-    backfill_provider.middleware_onion.inject(RpcMetricsMiddleware, layer=0)
+    backfill_provider.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
     subscription_provider: FallbackSubscriptionProvider | None = None
 
     def create_subscription_w3() -> FallbackAsyncWeb3:
@@ -89,7 +89,7 @@ async def create_runtime() -> BotRuntime:
             observer=DEFAULT_METRICS.rpc,
         )
         subscription_w3 = FallbackAsyncWeb3(subscription_provider)
-        subscription_w3.middleware_onion.inject(RpcMetricsMiddleware, layer=0)
+        subscription_w3.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
         return subscription_w3
 
     try:

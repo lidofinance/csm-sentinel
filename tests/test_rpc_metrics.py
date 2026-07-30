@@ -5,11 +5,22 @@ import pytest
 from prometheus_client import CollectorRegistry, generate_latest
 
 from sentinel.metrics.rpc import RpcMetrics, RpcMetricsMiddleware
-from sentinel.rpc_provider import FallbackRequestProvider, RpcEndpointPool
+from sentinel.rpc_provider import FallbackAsyncWeb3, FallbackRequestProvider, RpcEndpointPool
 
 
 def _value(registry: CollectorRegistry, name: str, labels: dict[str, str]) -> float | None:
     return registry.get_sample_value(name, labels)
+
+
+def test_middleware_can_be_registered_by_class():
+    provider = FallbackRequestProvider(
+        RpcEndpointPool(("ws://primary.invalid",)),
+        role="reads",
+        observer=RpcMetrics(CollectorRegistry()),
+    )
+    w3 = FallbackAsyncWeb3(provider)
+
+    w3.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
 
 
 @pytest.mark.asyncio
