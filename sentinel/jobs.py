@@ -49,17 +49,20 @@ class JobContext:
         interval_seconds = 60 * ALERT_INTERVAL_MINUTES
         app.job_queue.run_repeating(
             self._metrics.wrap("block_processing_check", self.callback_block_processing_check),
+            name="block_processing_check",
             interval=interval_seconds,
             first=0,
         )
         app.job_queue.run_repeating(
             self._metrics.wrap("chain_head_poll", self._poll_chain_head),
+            name="chain_head_poll",
             interval=CHAIN_HEAD_POLL_INTERVAL_SECONDS,
             first=0,
         )
         if self._secret_bundle is not None:
             app.job_queue.run_repeating(
                 self._metrics.wrap("secret_rotation_check", self._check_secret_rotation),
+                name="secret_rotation_check",
                 interval=SECRET_WATCH_INTERVAL_SECONDS,
                 first=SECRET_WATCH_INTERVAL_SECONDS,
             )

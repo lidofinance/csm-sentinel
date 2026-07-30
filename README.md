@@ -64,6 +64,10 @@ down gracefully when it changes so the process supervisor can restart it with th
 Local setups that provide all values through `.env` or process environment do not need either file
 path.
 
+Application logs are emitted as one JSON object per line. The startup configuration event contains
+only an explicit allowlist of non-secret settings; secret values, authorization headers, and RPC
+credentials are redacted from messages, structured fields, and exception tracebacks.
+
 Run SM Sentinel using Docker compose:
 
 ```bash

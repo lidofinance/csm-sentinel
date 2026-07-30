@@ -2,17 +2,13 @@ import asyncio
 import logging
 
 from sentinel.app.bootstrap import create_runtime, run
+from sentinel.app.logging import configure_logging
 from sentinel.handlers import register_handlers
 from sentinel.modules.community.events import (
     assert_event_mappings as assert_community_event_mappings,
 )
 from sentinel.modules.curated.events import assert_event_mappings as assert_curated_event_mappings
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +18,7 @@ def _assert_event_mappings() -> None:
 
 
 async def main() -> None:
+    configure_logging()
     _assert_event_mappings()
     runtime = await create_runtime()
     register_handlers(runtime)

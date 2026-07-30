@@ -35,6 +35,23 @@ def _make_subscription(chain_head: int = 0) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
+async def test_scheduled_jobs_have_distinct_names(tmp_path: Path):
+    app = SimpleNamespace(job_queue=SimpleNamespace(run_repeating=Mock()))
+    job_context = JobContext(
+        _make_subscription(),
+        secret_bundle=SecretBundle(tmp_path / "secrets.env", 1),
+    )
+
+    await job_context.schedule(app)
+
+    assert [call.kwargs["name"] for call in app.job_queue.run_repeating.call_args_list] == [
+        "block_processing_check",
+        "chain_head_poll",
+        "secret_rotation_check",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_secret_rotation_job_stops_subscription_on_new_version(tmp_path: Path):
     secrets = tmp_path / "secrets.env"
     secrets.write_text("SECRET_VERSION=2\nTOKEN=new\n")

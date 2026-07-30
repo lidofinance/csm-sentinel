@@ -1,8 +1,9 @@
 import asyncio
 import logging
-from pathlib import Path
 from contextlib import suppress
+from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 from telegram.ext import AIORateLimiter, ApplicationBuilder, ContextTypes
 from sentinel.app.application import SentinelApplication
@@ -10,6 +11,7 @@ from sentinel.app.build_info import application_user_agent
 from sentinel.app.contracts import discover_contract_addresses, log_discovered_addresses
 from sentinel.app.context import BotContext
 from sentinel.app.health import HealthServer, HealthState
+from sentinel.app.logging import register_sensitive_environment, register_sensitive_values
 from sentinel.app.module_adapter import build_module_adapter_from_config
 from sentinel.app.runtime import BotRuntime
 from sentinel.app.secrets import load_environment_files
@@ -58,6 +60,26 @@ def _resolve_backfill_start_block(
 async def create_runtime() -> BotRuntime:
     secret_bundle = load_environment_files()
     env_cfg = load_config_from_env()
+    register_sensitive_environment()
+    register_sensitive_values(env_cfg.token, *env_cfg.web3_socket_providers)
+    logger.info(
+        "Runtime configuration loaded",
+        extra={
+            "event": "configuration_loaded",
+            "config": {
+                "module_address": env_cfg.module_address,
+                "rpc_endpoints": [
+                    urlsplit(provider).hostname for provider in env_cfg.web3_socket_providers
+                ],
+                "healthcheck_host": env_cfg.healthcheck_host,
+                "healthcheck_port": env_cfg.healthcheck_port,
+                "filestorage_path": env_cfg.filestorage_path,
+                "block_batch_size": env_cfg.block_batch_size,
+                "admin_count": len(env_cfg.admin_ids),
+                "secret_bundle_version": (None if secret_bundle is None else secret_bundle.version),
+            },
+        },
+    )
     DEFAULT_METRICS.secrets.set_version(None if secret_bundle is None else secret_bundle.version)
     health = HealthState()
     health_server = HealthServer(
