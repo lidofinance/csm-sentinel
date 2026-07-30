@@ -3,6 +3,9 @@ from dataclasses import dataclass
 
 import aiohttp
 
+from sentinel.app.build_info import application_user_agent
+from sentinel.metrics import DEFAULT_METRICS, HttpMetricsMiddleware
+
 DistributionLogPayload = dict | list
 DistributionLogFetcher = Callable[[str], Awaitable[DistributionLogPayload]]
 
@@ -16,7 +19,11 @@ class DistributionStrikeSummary:
 async def default_distribution_log_fetcher(log_cid: str):
     ipfs_url = f"https://ipfs.io/ipfs/{log_cid}"
     timeout = aiohttp.ClientTimeout(total=30)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(
+        timeout=timeout,
+        headers={"User-Agent": application_user_agent()},
+        middlewares=(HttpMetricsMiddleware(DEFAULT_METRICS.http),),
+    ) as session:
         async with session.get(ipfs_url) as response:
             if response.status != 200:
                 raise aiohttp.ClientError(f"HTTP {response.status} when fetching {ipfs_url}")

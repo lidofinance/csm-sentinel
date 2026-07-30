@@ -10,6 +10,7 @@ from web3.exceptions import (
     Web3RPCError,
 )
 
+from sentinel.app.build_info import application_user_agent
 from sentinel.rpc_provider import (
     DEFAULT_CONNECTION_RETRIES_PER_ENDPOINT,
     FallbackRequestProvider,
@@ -47,6 +48,17 @@ def test_provider_uses_bounded_retries_and_safe_endpoint_label():
     assert provider._max_connection_retries == DEFAULT_CONNECTION_RETRIES_PER_ENDPOINT
     assert pool.endpoints[0].label == "rpc-1 (rpc.example)"
     assert pool.endpoints[0].metric_label == "rpc.example"
+
+
+def test_rpc_providers_send_application_user_agent_in_websocket_handshake():
+    pool = RpcEndpointPool(("wss://rpc.example",))
+    request_provider = _request_provider(pool)
+    subscription_provider = _provider(pool)
+
+    assert request_provider._transports[0].websocket_kwargs["user_agent_header"] == (
+        application_user_agent()
+    )
+    assert subscription_provider.websocket_kwargs["user_agent_header"] == (application_user_agent())
 
 
 @pytest.mark.asyncio

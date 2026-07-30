@@ -24,6 +24,7 @@ from web3.manager import RequestManager
 from web3.providers.async_base import AsyncJSONBaseProvider
 from websockets.exceptions import WebSocketException
 
+from sentinel.app.build_info import application_user_agent
 from sentinel.metrics.rpc import NOOP_RPC_OBSERVER, RpcObserver
 
 logger = logging.getLogger(__name__)
@@ -528,6 +529,7 @@ class FallbackRequestProvider(AsyncJSONBaseProvider, FallbackConnectionBase):
             WebSocketProvider(
                 endpoint.uri,
                 max_connection_retries=max_connection_retries,
+                websocket_kwargs={"user_agent_header": application_user_agent()},
             )
             for endpoint in pool.endpoints
         )
@@ -673,9 +675,12 @@ class FallbackSubscriptionProvider(WebSocketProvider, FallbackConnectionBase):
         if max_connection_retries < 1:
             raise ValueError("max_connection_retries must be a positive integer")
         self.observer = observer
+        websocket_kwargs = dict(kwargs.pop("websocket_kwargs", {}))
+        websocket_kwargs["user_agent_header"] = application_user_agent()
         super().__init__(
             endpoint_uri=pool.endpoints[0].uri,
             max_connection_retries=max_connection_retries,
+            websocket_kwargs=websocket_kwargs,
             **kwargs,
         )
         FallbackConnectionBase.__init__(

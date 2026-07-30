@@ -1,5 +1,6 @@
 from sentinel.metrics.build import BuildInfoMetrics
 from sentinel.metrics.chain import ChainMetrics
+from sentinel.metrics.http import HttpMetrics, HttpMetricsMiddleware
 from sentinel.metrics.jobs import JobMetrics, JobMetricsMiddleware, JobObserver
 from sentinel.metrics.registry import DEFAULT_METRICS, AppMetrics
 from sentinel.metrics.rpc import RpcMetrics, RpcMetricsMiddleware, RpcObserver
@@ -13,6 +14,8 @@ __all__ = (
     "AppMetrics",
     "BuildInfoMetrics",
     "ChainMetrics",
+    "HttpMetrics",
+    "HttpMetricsMiddleware",
     "JobMetrics",
     "JobMetricsMiddleware",
     "JobObserver",

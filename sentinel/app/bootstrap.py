@@ -6,6 +6,7 @@ from typing import cast
 
 from telegram.ext import AIORateLimiter, ApplicationBuilder, ContextTypes
 from sentinel.app.application import SentinelApplication
+from sentinel.app.build_info import application_user_agent
 from sentinel.app.contracts import discover_contract_addresses, log_discovered_addresses
 from sentinel.app.context import BotContext
 from sentinel.app.health import HealthServer, HealthState
@@ -104,13 +105,25 @@ async def create_runtime() -> BotRuntime:
         persistence = create_persistence(storage_path)
 
         context_types = ContextTypes(context=BotContext)
+        telegram_httpx_kwargs = {"headers": {"User-Agent": application_user_agent()}}
 
         application = cast(
             SentinelApplication,
             ApplicationBuilder()
             .application_class(SentinelApplication)
             .token(cfg.token)
-            .request(MetricsHTTPXRequest(DEFAULT_METRICS.telegram))
+            .request(
+                MetricsHTTPXRequest(
+                    DEFAULT_METRICS.telegram,
+                    httpx_kwargs=telegram_httpx_kwargs,
+                )
+            )
+            .get_updates_request(
+                MetricsHTTPXRequest(
+                    DEFAULT_METRICS.telegram,
+                    httpx_kwargs=telegram_httpx_kwargs,
+                )
+            )
             .context_types(context_types)
             .persistence(persistence)
             .rate_limiter(AIORateLimiter(max_retries=5))

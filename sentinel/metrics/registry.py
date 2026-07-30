@@ -3,6 +3,7 @@ from prometheus_client import REGISTRY, CollectorRegistry
 from sentinel.metrics.aggregation import AggregationMetrics
 from sentinel.metrics.build import BuildInfoMetrics
 from sentinel.metrics.chain import ChainMetrics
+from sentinel.metrics.http import HttpMetrics
 from sentinel.metrics.jobs import JobMetrics
 from sentinel.metrics.rpc import RpcMetrics
 from sentinel.metrics.telegram import TelegramMetrics
@@ -16,6 +17,7 @@ class AppMetrics:
         self.aggregation = AggregationMetrics(registry)
         self.build = BuildInfoMetrics(registry)
         self.chain = ChainMetrics(registry)
+        self.http = HttpMetrics(registry)
         self.jobs = JobMetrics(registry)
         self.rpc = RpcMetrics(registry)
         self.telegram = TelegramMetrics(registry)
