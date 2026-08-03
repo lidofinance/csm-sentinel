@@ -829,15 +829,19 @@ async def test_total_signing_key_count_events_are_aggregated_once_per_block():
 
 @pytest.mark.asyncio
 async def test_deposited_signing_key_count_events_are_aggregated_separately():
+    assert AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks == 7_200
+
     block_events = [
         _make_signing_keys_event(
             event_name="DepositedSigningKeysCountChanged",
             count=1,
+            block=123,
             log_index=1,
         ),
         _make_signing_keys_event(
             event_name="DepositedSigningKeysCountChanged",
             count=2,
+            block=123 + AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks - 1,
             tx="0xfeedbeef",
             log_index=2,
         ),
@@ -846,11 +850,12 @@ async def test_deposited_signing_key_count_events_are_aggregated_separately():
         aggregation_group=AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS,
         event_names=frozenset({DEPOSITED_SIGNING_KEYS_COUNT_CHANGED}),
         block_events=block_events,
+        current_block=block_events[-1].block,
     )
 
     await harness.aggregation.handle_event(block_events[0])
 
-    harness.history.fetch_events.assert_awaited_once_with(123, 123)
+    harness.history.fetch_events.assert_awaited_once_with(123, block_events[-1].block)
     prepared = [call.args[0] for call in harness.sink.emit.await_args_list]
     assert len(prepared) == 1
     assert prepared[0].event == "DepositedSigningKeysCountChanged"

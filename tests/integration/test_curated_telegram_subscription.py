@@ -2,6 +2,7 @@ import os
 import pytest
 
 from sentinel.config import clear_config
+from sentinel.modules.aggregation import BLOCKS_PER_DAY
 
 from .helpers import build_subscription
 
@@ -69,11 +70,13 @@ async def _exercise_curated_event(
     expected_markdown: str | None,
     anvil_launcher,
     expected_per_node: dict[str, str] | None = None,
+    aggregation_window_blocks: int | None = None,
 ) -> None:
-    anvil = await anvil_launcher(fork_block)
+    replay_end_block = fork_block + (aggregation_window_blocks or 1) - 1
+    anvil = await anvil_launcher(replay_end_block)
     harness = await build_subscription(anvil.ws_url, anvil.http_url)
     try:
-        await harness.replay_blocks(fork_block - 1, fork_block)
+        await harness.replay_blocks(fork_block - 1, replay_end_block)
         assert _has_expected_message(
             harness, event_name=event_name, expected_markdown=expected_markdown
         ), (
@@ -135,6 +138,7 @@ async def test_curated_process_blocks_deposited_signing_keys_count_changed(
             "[Transaction](https://etherscan.io/tx/0xdeadbeef)"
         ),
         anvil_launcher=anvil_launcher,
+        aggregation_window_blocks=BLOCKS_PER_DAY,
     )
 
 
