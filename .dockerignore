@@ -74,11 +74,21 @@ target/
 
 # Virtual environment
 .env
+.env.*
 .venv/
 venv/
 
 # PyCharm
 .idea
+.github/
+tests/
+.local/
+AGENTS.md
+README.md
+LICENSE
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
 
 # Python mode for VIM
 .ropeproject

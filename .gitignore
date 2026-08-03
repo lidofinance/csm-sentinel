@@ -1,5 +1,6 @@
 .storage
 .codex
+.local/
 .DS_Store
 
 # Byte-compiled / optimized / DLL files

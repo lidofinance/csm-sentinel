@@ -3,6 +3,14 @@ from typing import TYPE_CHECKING, Protocol
 
 from telegram.ext import Application
 
+from sentinel.app.secrets import (
+    SECRET_WATCH_INTERVAL_SECONDS,
+    SecretBundle,
+    read_secret_version,
+)
+from sentinel.metrics.jobs import JobMetricsMiddleware
+from sentinel.metrics.registry import DEFAULT_METRICS
+
 logger = logging.getLogger(__name__)
 logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 
@@ -16,13 +24,21 @@ class ChainHeadReader(Protocol):
 
 CHAIN_HEAD_POLL_INTERVAL_SECONDS = 5 * 60  # 5 minutes
 ALERT_INTERVAL_MINUTES = 30
+DEFAULT_JOB_METRICS = JobMetricsMiddleware(DEFAULT_METRICS.jobs)
 
 
 class JobContext:
     _alerted: bool = False
 
-    def __init__(self, subscription: ChainHeadReader) -> None:
+    def __init__(
+        self,
+        subscription: ChainHeadReader,
+        *,
+        secret_bundle: SecretBundle | None = None,
+    ) -> None:
         self._subscription = subscription
+        self._secret_bundle = secret_bundle
+        self._metrics = DEFAULT_JOB_METRICS
         self._chain_head: int = 0
         self._last_checked_chain_head: int = 0
 
@@ -32,15 +48,46 @@ class JobContext:
 
         interval_seconds = 60 * ALERT_INTERVAL_MINUTES
         app.job_queue.run_repeating(
-            self.callback_block_processing_check,
+            self._metrics.wrap("block_processing_check", self.callback_block_processing_check),
+            name="block_processing_check",
             interval=interval_seconds,
             first=0,
         )
         app.job_queue.run_repeating(
-            self._poll_chain_head,
+            self._metrics.wrap("chain_head_poll", self._poll_chain_head),
+            name="chain_head_poll",
             interval=CHAIN_HEAD_POLL_INTERVAL_SECONDS,
             first=0,
         )
+        if self._secret_bundle is not None:
+            app.job_queue.run_repeating(
+                self._metrics.wrap("secret_rotation_check", self._check_secret_rotation),
+                name="secret_rotation_check",
+                interval=SECRET_WATCH_INTERVAL_SECONDS,
+                first=SECRET_WATCH_INTERVAL_SECONDS,
+            )
+
+    async def _check_secret_rotation(self, context: "BotContext") -> bool:
+        bundle = self._secret_bundle
+        if bundle is None:
+            return True
+        try:
+            version = read_secret_version(bundle.path)
+        except (OSError, RuntimeError, ValueError):
+            logger.warning("Failed to read updated secret bundle", exc_info=True)
+            return False
+        if version == bundle.version:
+            return True
+
+        logger.info(
+            "Secret bundle version changed from %s to %s; restarting",
+            bundle.version,
+            version,
+        )
+        supervisor = context.runtime.module_supervisor
+        supervisor.request_shutdown()
+        await supervisor.raw_subscription.stop()
+        return True
 
     async def _poll_chain_head(self, context: "BotContext"):
         try:
@@ -48,8 +95,10 @@ class JobContext:
             if context is not None:
                 context.runtime.health.mark_progress()
             logger.debug("Polled chain head: %s", self._chain_head)
+            return True
         except Exception as exc:
             logger.warning("Failed to poll chain head: %s", exc)
+            return False
 
     async def callback_block_processing_check(self, context: "BotContext"):
         if not self._chain_head:

@@ -363,6 +363,18 @@ async def replay_transaction_on_anvil(
     return receipt
 
 
+async def mine_anvil_blocks(anvil_http_url: str, count: int) -> None:
+    if count <= 0:
+        return
+
+    w3 = AsyncWeb3(AsyncHTTPProvider(anvil_http_url))
+    try:
+        await w3.provider.make_request(RPCEndpoint("anvil_mine"), [hex(count)])
+    finally:
+        with suppress(Exception):
+            await w3.provider.disconnect()
+
+
 def _build_replay_tx_params(tx) -> TxParams[str, Any]:
     params: TxParams[str, Any] = {
         "from": tx["from"],

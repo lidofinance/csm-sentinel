@@ -51,6 +51,23 @@ But it is also possible to use a public node of any web3 providers.
 
 All other fields are pre-filled for the selected module and network. Dependent contract addresses, module type, staking module ID, and MetaRegistry address are discovered on startup.
 
+SM Sentinel supports two dotenv files:
+
+1. the application environment: the standard `.env` discovered by `python-dotenv`, or the file
+   referenced by `ENV_FILE_PATH`;
+2. an optional external secret bundle referenced by `SECRETS_FILE_PATH`.
+
+Existing process environment variables take precedence over the application environment file.
+Secret bundle values always take precedence. When `SECRETS_FILE_PATH` is configured, its file must
+include a positive integer `SECRET_VERSION`. Sentinel checks that version periodically and shuts
+down gracefully when it changes so the process supervisor can restart it with the new secrets.
+Local setups that provide all values through `.env` or process environment do not need either file
+path.
+
+Application logs are emitted as one JSON object per line. The startup configuration event contains
+only an explicit allowlist of non-secret settings; secret values, authorization headers, and RPC
+credentials are redacted from messages, structured fields, and exception tracebacks.
+
 Run SM Sentinel using Docker compose:
 
 ```bash

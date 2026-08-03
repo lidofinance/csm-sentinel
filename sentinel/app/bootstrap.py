@@ -1,16 +1,20 @@
 import asyncio
 import logging
-from pathlib import Path
 from contextlib import suppress
+from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 from telegram.ext import AIORateLimiter, ApplicationBuilder, ContextTypes
 from sentinel.app.application import SentinelApplication
+from sentinel.app.build_info import application_user_agent
 from sentinel.app.contracts import discover_contract_addresses, log_discovered_addresses
 from sentinel.app.context import BotContext
 from sentinel.app.health import HealthServer, HealthState
+from sentinel.app.logging import register_sensitive_environment, register_sensitive_values
 from sentinel.app.module_adapter import build_module_adapter_from_config
 from sentinel.app.runtime import BotRuntime
+from sentinel.app.secrets import load_environment_files
 from sentinel.app.storage import create_persistence
 from sentinel.app.telegram_adapters import (
     TelegramNotificationHandler,
@@ -31,6 +35,11 @@ from sentinel.rpc_provider import (
     FallbackSubscriptionProvider,
     RpcEndpointPool,
 )
+from sentinel.metrics import (
+    DEFAULT_METRICS,
+    MetricsHTTPXRequest,
+    RpcMetricsMiddleware,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +58,29 @@ def _resolve_backfill_start_block(
 
 
 async def create_runtime() -> BotRuntime:
+    secret_bundle = load_environment_files()
     env_cfg = load_config_from_env()
+    register_sensitive_environment()
+    register_sensitive_values(env_cfg.token, *env_cfg.web3_socket_providers)
+    logger.info(
+        "Runtime configuration loaded",
+        extra={
+            "event": "configuration_loaded",
+            "config": {
+                "module_address": env_cfg.module_address,
+                "rpc_endpoints": [
+                    urlsplit(provider).hostname for provider in env_cfg.web3_socket_providers
+                ],
+                "healthcheck_host": env_cfg.healthcheck_host,
+                "healthcheck_port": env_cfg.healthcheck_port,
+                "filestorage_path": env_cfg.filestorage_path,
+                "block_batch_size": env_cfg.block_batch_size,
+                "admin_count": len(env_cfg.admin_ids),
+                "secret_bundle_version": (None if secret_bundle is None else secret_bundle.version),
+            },
+        },
+    )
+    DEFAULT_METRICS.secrets.set_version(None if secret_bundle is None else secret_bundle.version)
     health = HealthState()
     health_server = HealthServer(
         health,
@@ -60,10 +91,16 @@ async def create_runtime() -> BotRuntime:
     heartbeat_task = asyncio.create_task(health.heartbeat_loop())
 
     rpc_endpoint_pool = RpcEndpointPool(env_cfg.web3_socket_providers)
-    reads_provider = FallbackRequestProvider(rpc_endpoint_pool, role="reads")
-    backfill_ws_provider = FallbackRequestProvider(rpc_endpoint_pool, role="backfill")
+    reads_provider = FallbackRequestProvider(
+        rpc_endpoint_pool, role="reads", observer=DEFAULT_METRICS.rpc
+    )
+    backfill_ws_provider = FallbackRequestProvider(
+        rpc_endpoint_pool, role="backfill", observer=DEFAULT_METRICS.rpc
+    )
     rpc_provider = FallbackAsyncWeb3(reads_provider)
+    rpc_provider.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
     backfill_provider = FallbackAsyncWeb3(backfill_ws_provider)
+    backfill_provider.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
     subscription_provider: FallbackSubscriptionProvider | None = None
 
     def create_subscription_w3() -> FallbackAsyncWeb3:
@@ -71,8 +108,11 @@ async def create_runtime() -> BotRuntime:
         subscription_provider = FallbackSubscriptionProvider(
             rpc_endpoint_pool,
             role="subscription",
+            observer=DEFAULT_METRICS.rpc,
         )
-        return FallbackAsyncWeb3(subscription_provider)
+        subscription_w3 = FallbackAsyncWeb3(subscription_provider)
+        subscription_w3.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
+        return subscription_w3
 
     try:
         await reads_provider.validate_endpoint_chain_ids()
@@ -90,12 +130,25 @@ async def create_runtime() -> BotRuntime:
         persistence = create_persistence(storage_path)
 
         context_types = ContextTypes(context=BotContext)
+        telegram_httpx_kwargs = {"headers": {"User-Agent": application_user_agent()}}
 
         application = cast(
             SentinelApplication,
             ApplicationBuilder()
             .application_class(SentinelApplication)
             .token(cfg.token)
+            .request(
+                MetricsHTTPXRequest(
+                    DEFAULT_METRICS.telegram,
+                    httpx_kwargs=telegram_httpx_kwargs,
+                )
+            )
+            .get_updates_request(
+                MetricsHTTPXRequest(
+                    DEFAULT_METRICS.telegram,
+                    httpx_kwargs=telegram_httpx_kwargs,
+                )
+            )
             .context_types(context_types)
             .persistence(persistence)
             .rate_limiter(AIORateLimiter(max_retries=5))
@@ -105,13 +158,14 @@ async def create_runtime() -> BotRuntime:
         chain = SharedChainConnection(rpc_provider)
         module_adapter = build_module_adapter_from_config(cfg, rpc_provider, chain)
 
+        processing_state = TelegramProcessingStateProvider(application)
         module_supervisor = ModuleRuntimeSupervisor(
             create_subscription_w3,
             config=cfg,
             chain=chain,
             health=health,
             module_adapter=module_adapter,
-            storage=TelegramProcessingStateProvider(application),
+            storage=processing_state,
             notification_sink=TelegramNotificationSink(application),
             backfill_w3=backfill_provider,
         )
@@ -119,7 +173,14 @@ async def create_runtime() -> BotRuntime:
             application,
             lambda: module_supervisor.event_messages,
         )
-        job_context = JobContext(module_supervisor)
+        job_context = JobContext(module_supervisor, secret_bundle=secret_bundle)
+        DEFAULT_METRICS.chain.bind(
+            health=health,
+            processed_block=lambda: processing_state.state.block.value,
+        )
+        DEFAULT_METRICS.aggregation.bind(
+            lambda: len(processing_state.state.aggregation_windows.pending())
+        )
 
         runtime = BotRuntime(
             application=application,
