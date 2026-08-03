@@ -10,7 +10,7 @@ from sentinel.app.contracts import (
     get_contract_abis,
 )
 from sentinel.app.module_adapter import build_module_adapter_from_addresses
-from sentinel.chain import ConnectOnDemand
+from sentinel.chain import SharedChainConnection
 from sentinel.module_types import ModuleType
 from sentinel.modules.base import BaseModuleAdapter
 from sentinel.modules.texts import BotTexts
@@ -126,8 +126,8 @@ def _dummy_contracts() -> CommunityModuleContracts:
     )
 
 
-def _dummy_chain() -> ConnectOnDemand:
-    return ConnectOnDemand(_FakeW3())
+def _dummy_chain() -> SharedChainConnection:
+    return SharedChainConnection(_FakeW3())
 
 
 def test_community_module_adapter_instantiation():

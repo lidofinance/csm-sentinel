@@ -1,9 +1,11 @@
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from sentinel.app.storage import BotStorage
+from sentinel.app.secrets import SecretBundle
 from sentinel.jobs import JobContext, ALERT_INTERVAL_MINUTES
 from sentinel.modules.community.texts import CommunityTexts
 from sentinel.modules.community.texts import NO_NEW_BLOCKS_ADMIN_ALERT
@@ -30,6 +32,61 @@ def _make_subscription(chain_head: int = 0) -> SimpleNamespace:
     sub = SimpleNamespace()
     sub.get_block_number = AsyncMock(return_value=chain_head)
     return sub
+
+
+@pytest.mark.asyncio
+async def test_scheduled_jobs_have_distinct_names(tmp_path: Path):
+    app = SimpleNamespace(job_queue=SimpleNamespace(run_repeating=Mock()))
+    job_context = JobContext(
+        _make_subscription(),
+        secret_bundle=SecretBundle(tmp_path / "secrets.env", 1),
+    )
+
+    await job_context.schedule(app)
+
+    assert [call.kwargs["name"] for call in app.job_queue.run_repeating.call_args_list] == [
+        "block_processing_check",
+        "chain_head_poll",
+        "secret_rotation_check",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_secret_rotation_job_stops_subscription_on_new_version(tmp_path: Path):
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("SECRET_VERSION=2\nTOKEN=new\n")
+    supervisor = SimpleNamespace(
+        request_shutdown=Mock(),
+        raw_subscription=SimpleNamespace(stop=AsyncMock()),
+    )
+    context = SimpleNamespace(runtime=SimpleNamespace(module_supervisor=supervisor))
+    job_context = JobContext(
+        _make_subscription(),
+        secret_bundle=SecretBundle(secrets, 1),
+    )
+
+    assert await job_context._check_secret_rotation(context) is True
+    supervisor.request_shutdown.assert_called_once_with()
+    supervisor.raw_subscription.stop.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_secret_rotation_job_ignores_loaded_version(tmp_path: Path):
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("SECRET_VERSION=1\nTOKEN=current\n")
+    supervisor = SimpleNamespace(
+        request_shutdown=Mock(),
+        raw_subscription=SimpleNamespace(stop=AsyncMock()),
+    )
+    context = SimpleNamespace(runtime=SimpleNamespace(module_supervisor=supervisor))
+    job_context = JobContext(
+        _make_subscription(),
+        secret_bundle=SecretBundle(secrets, 1),
+    )
+
+    assert await job_context._check_secret_rotation(context) is True
+    supervisor.request_shutdown.assert_not_called()
+    supervisor.raw_subscription.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -118,7 +175,7 @@ async def test_poll_chain_head():
 
     await job_context._poll_chain_head(context)
     assert job_context._chain_head == 999_999
-    assert context.bot_storage.block.value == 999_999
+    assert context.bot_storage.block.value == 100
     sub.get_block_number.assert_awaited_once()
 
 

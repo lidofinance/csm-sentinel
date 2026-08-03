@@ -26,3 +26,8 @@ def load_build_info(path: Path = BUILD_INFO_PATH) -> dict[str, str]:
         return DEFAULT_BUILD_INFO.copy()
 
     return {key: str(payload.get(key, default)) for key, default in DEFAULT_BUILD_INFO.items()}
+
+
+def application_user_agent(build_info: dict[str, str] | None = None) -> str:
+    info = load_build_info() if build_info is None else build_info
+    return f"sm-sentinel/{info['version']}"

@@ -5,8 +5,14 @@ import os
 import pytest
 
 from sentinel.config import get_config, clear_config
+from sentinel.modules.aggregation import BLOCKS_PER_DAY
 
-from .helpers import build_module_supervisor, replay_transaction_on_anvil, build_subscription
+from .helpers import (
+    build_module_supervisor,
+    build_subscription,
+    mine_anvil_blocks,
+    replay_transaction_on_anvil,
+)
 
 
 COMMUNITY_HOODI_MODULE = "0x79CEf36D84743222f37765204Bec41E92a93E59d"
@@ -16,12 +22,12 @@ COMMUNITY_HOODI_MODULE = "0x79CEf36D84743222f37765204Bec41E92a93E59d"
 def community_hoodi_config_env():
     """Point this suite at the Hoodi Community deployment used by the fixture blocks."""
 
-    provider_url = os.getenv("WEB3_SOCKET_PROVIDER")
+    provider_url = os.getenv("WEB3_SOCKET_PROVIDERS") or os.getenv("WEB3_SOCKET_PROVIDER")
     if not provider_url:
-        pytest.skip("WEB3_SOCKET_PROVIDER is required")
+        pytest.skip("WEB3_SOCKET_PROVIDERS or WEB3_SOCKET_PROVIDER is required")
 
     with pytest.MonkeyPatch.context() as m:
-        m.setenv("WEB3_SOCKET_PROVIDER", provider_url)
+        m.setenv("WEB3_SOCKET_PROVIDERS", provider_url)
         m.setenv("MODULE_ADDRESS", COMMUNITY_HOODI_MODULE)
         m.setenv("ETHERSCAN_URL", "https://etherscan.io")
         m.setenv("BEACONCHAIN_URL", "https://beaconcha.in")
@@ -42,10 +48,13 @@ async def _exercise_event(
     expected_markdown: str | None,
     anvil_launcher,
     via_subscription: bool = False,
+    aggregation_window_blocks: int | None = None,
 ) -> None:
-    fork_block = fork_block if not via_subscription else fork_block - 1
+    event_block = fork_block
+    replay_end_block = event_block + (aggregation_window_blocks or 1) - 1
+    launch_block = event_block - 1 if via_subscription else replay_end_block
 
-    anvil = await anvil_launcher(fork_block)
+    anvil = await anvil_launcher(launch_block)
     harness = await build_subscription(anvil.ws_url, anvil.http_url)
     subscription_task: asyncio.Task | None = None
     try:
@@ -55,14 +64,17 @@ async def _exercise_event(
             try:
                 await harness.wait_until_subscribed()
                 await replay_transaction_on_anvil(
-                    fork_provider_url=cfg.web3_socket_provider,
+                    fork_provider_url=cfg.web3_socket_providers[0],
                     anvil_http_url=anvil.http_url,
                     tx_hash=tx_hash,
                 )
+                if aggregation_window_blocks is not None:
+                    await mine_anvil_blocks(anvil.http_url, aggregation_window_blocks - 1)
                 assert await _wait_for(
                     lambda: _has_expected_message(
                         harness, event_name=event_name, expected_markdown=expected_markdown
-                    )
+                    ),
+                    timeout=30.0 if aggregation_window_blocks is not None else 5.0,
                 ), (
                     f"Did not find expected message for event {event_name}, \n"
                     f"{expected_markdown=}\n"
@@ -71,7 +83,7 @@ async def _exercise_event(
             finally:
                 await harness.stop()
         else:
-            await harness.replay_blocks(fork_block - 1, fork_block)
+            await harness.replay_blocks(event_block - 1, replay_end_block)
             assert _has_expected_message(
                 harness, event_name=event_name, expected_markdown=expected_markdown
             ), (
@@ -129,7 +141,7 @@ async def test_process_live_initialized_v3_upgrade_rebuilds_runtime(anvil_launch
         await harness.wait_until_subscribed()
 
         await replay_transaction_on_anvil(
-            fork_provider_url=cfg.web3_socket_provider,
+            fork_provider_url=cfg.web3_socket_providers[0],
             anvil_http_url=anvil.http_url,
             tx_hash="0xcccb19dcb5e0695cb15ce08894d64cf4b304c794f20b48995855f4e8e48d50cb",
         )
@@ -173,6 +185,7 @@ async def test_process_blocks_deposited_signing_keys_count_changed(
         expected_markdown="🤩 *Keys were deposited\\!*\n\nDeposited keys count: `0 \\-\\> 1`\n\nnodeOperatorId: 299\n[Transaction](https://etherscan.io/tx/0xdeadbeef)",
         anvil_launcher=anvil_launcher,
         via_subscription=via_subscription,
+        aggregation_window_blocks=BLOCKS_PER_DAY,
     )
 
 

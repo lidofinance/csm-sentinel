@@ -15,6 +15,9 @@ OPERATOR_GROUP_CLEARED = "OperatorGroupCleared"
 NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGED = "NodeOperatorEffectiveWeightChanged"
 BOND_CURVE_WEIGHT_SET = "BondCurveWeightSet"
 
+# Ethereum and Hoodi use nominal 12-second consensus slots.
+BLOCKS_PER_DAY = 24 * 60 * 60 // 12
+
 
 @dataclass(frozen=True, slots=True)
 class AggregationGroup:
@@ -29,7 +32,7 @@ class AggregationGroup:
 class AggregationGroups:
     DEPOSITED_SIGNING_KEY_COUNTS = AggregationGroup(
         name="deposited_signing_key_counts",
-        window_blocks=1,
+        window_blocks=BLOCKS_PER_DAY,
     )
     TOTAL_SIGNING_KEY_COUNTS = AggregationGroup(
         name="total_signing_key_counts",

@@ -1,31 +1,45 @@
 import asyncio
 import logging
-from pathlib import Path
 from contextlib import suppress
+from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 from telegram.ext import AIORateLimiter, ApplicationBuilder, ContextTypes
-from web3 import AsyncWeb3, WebSocketProvider
-
 from sentinel.app.application import SentinelApplication
+from sentinel.app.build_info import application_user_agent
+from sentinel.app.contracts import discover_contract_addresses, log_discovered_addresses
 from sentinel.app.context import BotContext
 from sentinel.app.health import HealthServer, HealthState
+from sentinel.app.logging import register_sensitive_environment, register_sensitive_values
 from sentinel.app.module_adapter import build_module_adapter_from_config
 from sentinel.app.runtime import BotRuntime
+from sentinel.app.secrets import load_environment_files
 from sentinel.app.storage import create_persistence
 from sentinel.app.telegram_adapters import (
     TelegramNotificationHandler,
     TelegramNotificationSink,
     TelegramProcessingStateProvider,
 )
-from sentinel.chain import ConnectOnDemand
-from sentinel.config import get_config, get_healthcheck_bind_from_env
+from sentinel.chain import SharedChainConnection
+from sentinel.config import load_config_from_env, set_config
 from sentinel.utils import normalize_block_number
 from sentinel.handlers.errors import error_handler, build_error_callback
 from sentinel.services.subscription import (
     ModuleRuntimeSupervisor,
 )
 from sentinel.jobs import JobContext
+from sentinel.rpc_provider import (
+    FallbackAsyncWeb3,
+    FallbackRequestProvider,
+    FallbackSubscriptionProvider,
+    RpcEndpointPool,
+)
+from sentinel.metrics import (
+    DEFAULT_METRICS,
+    MetricsHTTPXRequest,
+    RpcMetricsMiddleware,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +57,70 @@ def _resolve_backfill_start_block(
     return checkpoint + 1 if checkpoint > 0 else 0
 
 
-def create_runtime() -> BotRuntime:
+async def create_runtime() -> BotRuntime:
+    secret_bundle = load_environment_files()
+    env_cfg = load_config_from_env()
+    register_sensitive_environment()
+    register_sensitive_values(env_cfg.token, *env_cfg.web3_socket_providers)
+    logger.info(
+        "Runtime configuration loaded",
+        extra={
+            "event": "configuration_loaded",
+            "config": {
+                "module_address": env_cfg.module_address,
+                "rpc_endpoints": [
+                    urlsplit(provider).hostname for provider in env_cfg.web3_socket_providers
+                ],
+                "healthcheck_host": env_cfg.healthcheck_host,
+                "healthcheck_port": env_cfg.healthcheck_port,
+                "filestorage_path": env_cfg.filestorage_path,
+                "block_batch_size": env_cfg.block_batch_size,
+                "admin_count": len(env_cfg.admin_ids),
+                "secret_bundle_version": (None if secret_bundle is None else secret_bundle.version),
+            },
+        },
+    )
+    DEFAULT_METRICS.secrets.set_version(None if secret_bundle is None else secret_bundle.version)
     health = HealthState()
-    health_host, health_port = get_healthcheck_bind_from_env()
-    health_server = HealthServer(health, host=health_host, port=health_port)
+    health_server = HealthServer(
+        health,
+        host=env_cfg.healthcheck_host,
+        port=env_cfg.healthcheck_port,
+    )
     health_server.start()
+    heartbeat_task = asyncio.create_task(health.heartbeat_loop())
+
+    rpc_endpoint_pool = RpcEndpointPool(env_cfg.web3_socket_providers)
+    reads_provider = FallbackRequestProvider(
+        rpc_endpoint_pool, role="reads", observer=DEFAULT_METRICS.rpc
+    )
+    backfill_ws_provider = FallbackRequestProvider(
+        rpc_endpoint_pool, role="backfill", observer=DEFAULT_METRICS.rpc
+    )
+    rpc_provider = FallbackAsyncWeb3(reads_provider)
+    rpc_provider.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
+    backfill_provider = FallbackAsyncWeb3(backfill_ws_provider)
+    backfill_provider.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
+    subscription_provider: FallbackSubscriptionProvider | None = None
+
+    def create_subscription_w3() -> FallbackAsyncWeb3:
+        nonlocal subscription_provider
+        subscription_provider = FallbackSubscriptionProvider(
+            rpc_endpoint_pool,
+            role="subscription",
+            observer=DEFAULT_METRICS.rpc,
+        )
+        subscription_w3 = FallbackAsyncWeb3(subscription_provider)
+        subscription_w3.middleware_onion.inject(RpcMetricsMiddleware, name="rpc_metrics", layer=0)
+        return subscription_w3
 
     try:
-        cfg = get_config()
+        await reads_provider.validate_endpoint_chain_ids()
+        addresses = await discover_contract_addresses(rpc_provider, env_cfg.module_address)
+        log_discovered_addresses(addresses)
+        cfg = env_cfg.resolve(addresses)
+        set_config(cfg)
+
         if cfg.token is None:
             raise RuntimeError("TOKEN must be configured")
 
@@ -60,38 +130,42 @@ def create_runtime() -> BotRuntime:
         persistence = create_persistence(storage_path)
 
         context_types = ContextTypes(context=BotContext)
+        telegram_httpx_kwargs = {"headers": {"User-Agent": application_user_agent()}}
 
         application = cast(
             SentinelApplication,
             ApplicationBuilder()
             .application_class(SentinelApplication)
             .token(cfg.token)
+            .request(
+                MetricsHTTPXRequest(
+                    DEFAULT_METRICS.telegram,
+                    httpx_kwargs=telegram_httpx_kwargs,
+                )
+            )
+            .get_updates_request(
+                MetricsHTTPXRequest(
+                    DEFAULT_METRICS.telegram,
+                    httpx_kwargs=telegram_httpx_kwargs,
+                )
+            )
             .context_types(context_types)
             .persistence(persistence)
             .rate_limiter(AIORateLimiter(max_retries=5))
             .build(),
         )
 
-        persistent_provider = AsyncWeb3(
-            WebSocketProvider(cfg.web3_socket_provider, max_connection_retries=-1)
-        )
-        rpc_provider = AsyncWeb3(
-            WebSocketProvider(cfg.web3_socket_provider, max_connection_retries=-1)
-        )
-        backfill_provider = AsyncWeb3(
-            WebSocketProvider(cfg.web3_socket_provider, max_connection_retries=-1)
-        )
-
-        chain = ConnectOnDemand(rpc_provider)
+        chain = SharedChainConnection(rpc_provider)
         module_adapter = build_module_adapter_from_config(cfg, rpc_provider, chain)
 
+        processing_state = TelegramProcessingStateProvider(application)
         module_supervisor = ModuleRuntimeSupervisor(
-            persistent_provider,
+            create_subscription_w3,
             config=cfg,
             chain=chain,
             health=health,
             module_adapter=module_adapter,
-            storage=TelegramProcessingStateProvider(application),
+            storage=processing_state,
             notification_sink=TelegramNotificationSink(application),
             backfill_w3=backfill_provider,
         )
@@ -99,7 +173,14 @@ def create_runtime() -> BotRuntime:
             application,
             lambda: module_supervisor.event_messages,
         )
-        job_context = JobContext(module_supervisor)
+        job_context = JobContext(module_supervisor, secret_bundle=secret_bundle)
+        DEFAULT_METRICS.chain.bind(
+            health=health,
+            processed_block=lambda: processing_state.state.block.value,
+        )
+        DEFAULT_METRICS.aggregation.bind(
+            lambda: len(processing_state.state.aggregation_windows.pending())
+        )
 
         runtime = BotRuntime(
             application=application,
@@ -109,12 +190,25 @@ def create_runtime() -> BotRuntime:
             chain=chain,
             health=health,
             health_server=health_server,
+            heartbeat_task=heartbeat_task,
         )
         application.attach_runtime(runtime)
         return runtime
-    except Exception as exc:
+    except BaseException as exc:
         health.mark_fatal_error(exc)
         health_server.stop()
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
+        for provider in (
+            subscription_provider,
+            reads_provider,
+            backfill_ws_provider,
+        ):
+            if provider is None:
+                continue
+            with suppress(Exception):
+                await provider.disconnect()
         raise
 
 
@@ -132,7 +226,7 @@ async def _run(runtime: BotRuntime) -> None:
     await application.start()
     application.add_error_handler(error_handler)
 
-    heartbeat_task = asyncio.create_task(runtime.health.heartbeat_loop())
+    heartbeat_task = runtime.heartbeat_task
     module_supervisor_task: asyncio.Task[None] | None = None
     try:
         persisted_block = application.bot_data.get("block")
@@ -166,11 +260,13 @@ async def _run(runtime: BotRuntime) -> None:
         # Start the live subscription first, then backfill up to a post-subscribe head.
         # This avoids missing blocks mined while historical catch-up is running.
         module_supervisor_task = asyncio.create_task(module_supervisor.subscribe())
-        await module_supervisor.wait_until_subscribed()
+        await _wait_for_subscription_start(module_supervisor, module_supervisor_task)
         runtime.health.mark_startup_complete()
 
         if block_from != 0:
+            runtime.health.mark_catchup_started()
             await module_supervisor.catch_up_from(block_from)
+            runtime.health.mark_catchup_complete()
         else:
             live_head = await module_supervisor.checkpoint_current_head()
             logger.info(
@@ -200,9 +296,31 @@ async def _run(runtime: BotRuntime) -> None:
         await module_supervisor.close()
         await updater.stop()
         await application.stop()
+        await runtime.chain.close()
         await application.shutdown()
         runtime.health_server.stop()
 
 
-def run(runtime: BotRuntime) -> None:
-    asyncio.run(_run(runtime))
+async def run(runtime: BotRuntime) -> None:
+    await _run(runtime)
+
+
+async def _wait_for_subscription_start(
+    module_supervisor: ModuleRuntimeSupervisor,
+    supervisor_task: asyncio.Task[None],
+) -> None:
+    subscribed_task = asyncio.create_task(module_supervisor.wait_until_subscribed())
+    try:
+        done, _ = await asyncio.wait(
+            {subscribed_task, supervisor_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if supervisor_task in done:
+            await supervisor_task
+            raise RuntimeError("Subscription supervisor stopped before startup completed")
+        await subscribed_task
+    finally:
+        if not subscribed_task.done():
+            subscribed_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await subscribed_task

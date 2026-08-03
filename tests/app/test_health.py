@@ -2,6 +2,8 @@ import json
 from urllib.error import HTTPError
 from urllib.request import urlopen
 
+from prometheus_client import CONTENT_TYPE_LATEST
+
 from sentinel.app.health import (
     HealthServer,
     HealthState,
@@ -99,6 +101,21 @@ def test_health_state_stale_heartbeat_breaks_liveness():
     assert snapshot.ready is False
 
 
+def test_health_state_is_not_ready_during_catchup():
+    health = HealthState()
+    health.mark_polling_started()
+    health.mark_subscription_active()
+    health.mark_startup_complete()
+
+    health.mark_catchup_started()
+    assert health.snapshot().ready is False
+    assert health.snapshot().catchup_active is True
+
+    health.mark_catchup_complete()
+    assert health.snapshot().ready is True
+    assert health.snapshot().catchup_active is False
+
+
 def test_health_server_reports_status_endpoints():
     health = HealthState()
     build_info = {"version": "v1.2.3", "branch": "main", "commit": "abc123"}
@@ -117,6 +134,14 @@ def test_health_server_reports_status_endpoints():
             assert response.status == 200
             assert response.headers["Cache-Control"] == "no-store"
             assert json.loads(response.read()) == build_info
+
+        with urlopen(f"{base_url}/metrics", timeout=1) as response:
+            payload = response.read()
+            assert response.status == 200
+            assert response.headers["Content-Type"] == CONTENT_TYPE_LATEST
+            assert response.headers["Cache-Control"] == "no-store"
+            assert response.headers["Content-Length"] == str(len(payload))
+            assert b"# TYPE python_info gauge\n" in payload
 
         health.mark_polling_started()
         health.mark_subscription_active()

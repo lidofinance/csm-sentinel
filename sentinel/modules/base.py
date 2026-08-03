@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Protocol
 from eth_typing import ChecksumAddress
 
 from sentinel.app.contracts import ContractABIs, ContractAddresses, _find_staking_module_id
-from sentinel.chain import ConnectOnDemand
+from sentinel.chain import SharedChainConnection
 from sentinel.module_types import ModuleType
 from sentinel.modules.texts import BotTexts
 
@@ -37,7 +37,7 @@ class ModuleAdapter(Protocol):
     addresses: ContractAddresses
     contracts: Any
     contract_abis: ContractABIs
-    chain: ConnectOnDemand
+    chain: SharedChainConnection
     texts: BotTexts
     module_ui_url: str | None
 
@@ -83,7 +83,7 @@ class BaseModuleAdapter:
         contracts: Any,
         module_ui_url: str | None,
         contract_abis: ContractABIs,
-        chain: ConnectOnDemand,
+        chain: SharedChainConnection,
     ) -> None:
         self.addresses = addresses
         self.contracts = contracts

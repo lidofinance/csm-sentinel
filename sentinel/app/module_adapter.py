@@ -7,7 +7,7 @@ from sentinel.app.contracts import (
     ContractAddresses,
     CuratedContractAddresses,
 )
-from sentinel.chain import ConnectOnDemand
+from sentinel.chain import SharedChainConnection
 from sentinel.modules.base import ModuleAdapter
 from sentinel.modules.community.adapter import CommunityModuleAdapter
 from sentinel.modules.curated.adapter import CuratedModuleAdapter
@@ -25,7 +25,7 @@ def build_module_adapter_from_addresses(
     addresses: ContractAddresses,
     w3: AsyncWeb3,
     module_ui_url: str | None,
-    chain: ConnectOnDemand,
+    chain: SharedChainConnection,
 ) -> ModuleAdapter:
     if isinstance(addresses, CommunityContractAddresses):
         contract_abis = CommunityModuleAdapter.contract_abis_for(addresses)
@@ -53,6 +53,6 @@ def build_module_adapter_from_addresses(
 def build_module_adapter_from_config(
     cfg: "Config",
     w3: AsyncWeb3,
-    chain: ConnectOnDemand,
+    chain: SharedChainConnection,
 ) -> ModuleAdapter:
     return build_module_adapter_from_addresses(cfg.contract_addresses, w3, cfg.module_ui_url, chain)

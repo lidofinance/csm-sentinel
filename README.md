@@ -40,13 +40,33 @@ Then, create a `.env` by copying the sample matching the module and network you 
 
 Fill in the required fields:
 - `TOKEN`: The token you received from the BotFather
-- `WEB3_SOCKET_PROVIDER`: The websocket provider for your node. 
+- `WEB3_SOCKET_PROVIDERS`: A comma-separated list of websocket providers. The first URL is
+the primary provider; SM Sentinel switches to the next healthy URL when the active
+connection fails. `WEB3_SOCKET_PROVIDER` remains supported as an equivalent legacy alias;
+`WEB3_SOCKET_PROVIDERS` takes precedence when both are set.
 Preferably, use your own local node, for example the execution node you already run for validators.
 But it is also possible to use a public node of any web3 providers.
 - `MODULE_ADDRESS`: The staking module address to monitor. Use the CSM address for a CSM instance or the Curated Module address for a Curated instance.
 - `MODULE_UI_URL`: Optional URL used in notification links. Use the matching CSM or Curated Module UI.
 
 All other fields are pre-filled for the selected module and network. Dependent contract addresses, module type, staking module ID, and MetaRegistry address are discovered on startup.
+
+SM Sentinel supports two dotenv files:
+
+1. the application environment: the standard `.env` discovered by `python-dotenv`, or the file
+   referenced by `ENV_FILE_PATH`;
+2. an optional external secret bundle referenced by `SECRETS_FILE_PATH`.
+
+Existing process environment variables take precedence over the application environment file.
+Secret bundle values always take precedence. When `SECRETS_FILE_PATH` is configured, its file must
+include a positive integer `SECRET_VERSION`. Sentinel checks that version periodically and shuts
+down gracefully when it changes so the process supervisor can restart it with the new secrets.
+Local setups that provide all values through `.env` or process environment do not need either file
+path.
+
+Application logs are emitted as one JSON object per line. The startup configuration event contains
+only an explicit allowlist of non-secret settings; secret values, authorization headers, and RPC
+credentials are redacted from messages, structured fields, and exception tracebacks.
 
 Run SM Sentinel using Docker compose:
 
@@ -113,7 +133,7 @@ You need to use a special docker-compose file that connects the Sentinel instanc
 docker compose -f docker-compose-ethd.yml up -d
 ```
 
-`WEB3_SOCKET_PROVIDER` env variable is set to `ws://execution:8546` via docker-compose file, 
+`WEB3_SOCKET_PROVIDERS` env variable is set to `ws://execution:8546` via docker-compose file,
 so you don't need to specify it in the `.env` file.
 
 ## Extra configuration
@@ -167,7 +187,7 @@ To enable the suite:
 
 1. Install a local fork provider:
    - [`anvil`](https://book.getfoundry.sh/anvil/)
-2. Ensure `.env` contains a `WEB3_SOCKET_PROVIDER` that can serve archive data;
+2. Ensure `.env` contains a `WEB3_SOCKET_PROVIDERS` entry that can serve archive data;
    the tests reuse this value as the fork source (WebSocket URLs are
    translated to their HTTP equivalents automatically)
 
