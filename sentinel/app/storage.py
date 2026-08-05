@@ -1,5 +1,6 @@
 """Storage helpers wrapping the persistence-backed bot and chat state."""
 
+import json
 import logging
 from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
@@ -8,7 +9,8 @@ from typing import Any, Dict, Set
 
 from telegram.ext import BasePersistence, PicklePersistence
 
-from sentinel.modules.aggregation import AggregationWindow
+from sentinel.models import Event
+from sentinel.modules.aggregation import AggregationKey, AggregationWindow
 
 logger = logging.getLogger(__name__)
 
@@ -233,51 +235,39 @@ class AggregationWindowStore:
     """Helper exposing persisted aggregation windows."""
 
     KEY = "aggregation_windows"
-    STATUS_PENDING = "pending"
-    STATUS_AGGREGATED = "aggregated"
 
     def __init__(self, bot_data: MutableMapping[str, Any]):
         self._bot_data = bot_data
         self._bot_data[self.KEY] = self._normalise_windows(self._bot_data.get(self.KEY))
 
     def upsert_pending(self, window: AggregationWindow) -> None:
-        self._put(window, self.STATUS_PENDING)
-
-    def mark_aggregated(self, window: AggregationWindow) -> None:
-        self._put(window, self.STATUS_AGGREGATED)
+        record = AggregationWindowRecord(window=window)
+        self._records[record.key] = record.to_dict()
 
     def discard(self, window: AggregationWindow) -> None:
         self._records.pop(AggregationWindowRecord.key_for(window), None)
 
     def pending(self) -> list[AggregationWindow]:
-        return [
-            record.window
-            for record in self._records_from(self._records)
-            if record.status == self.STATUS_PENDING
-        ]
+        return [record.window for record in self._records_from(self._records)]
 
-    def contains_active(self, group: str, block: int) -> bool:
-        return any(
-            record.window.group == group
-            and record.window.start_block <= block <= record.window.end_block
-            for record in self._records_from(self._records)
-        )
-
-    def prune(self, current_block: int, retain_blocks: int = 128) -> None:
-        min_end_block = current_block - retain_blocks
-        self._bot_data[self.KEY] = {
-            record.key: record.to_dict()
-            for record in self._records_from(self._records)
-            if record.status != self.STATUS_AGGREGATED or record.window.end_block >= min_end_block
-        }
+    def pending_for(
+        self,
+        group: str,
+        aggregation_key: AggregationKey,
+        block: int,
+    ) -> AggregationWindow | None:
+        for record in self._records_from(self._records):
+            if (
+                record.window.group == group
+                and record.window.aggregation_key == aggregation_key
+                and record.window.contains(block)
+            ):
+                return record.window
+        return None
 
     @property
     def _records(self) -> dict[str, dict[str, Any]]:
         return self._bot_data[self.KEY]
-
-    def _put(self, window: AggregationWindow, status: str) -> None:
-        record = AggregationWindowRecord.from_window(window, status)
-        self._records[record.key] = record.to_dict()
 
     @classmethod
     def _records_from(cls, raw_records: dict[str, Any]) -> list["AggregationWindowRecord"]:
@@ -287,9 +277,6 @@ class AggregationWindowStore:
                 parsed_record = AggregationWindowRecord.from_dict(record)
             except (KeyError, TypeError, ValueError):
                 logger.warning("Skipping malformed aggregation window record: %r", record)
-                continue
-            if parsed_record.status not in {cls.STATUS_PENDING, cls.STATUS_AGGREGATED}:
-                logger.warning("Skipping aggregation window with unknown status: %r", record)
                 continue
             parsed_records.append(parsed_record)
         return parsed_records
@@ -309,22 +296,22 @@ class AggregationWindowStore:
 @dataclass(frozen=True, slots=True)
 class AggregationWindowRecord:
     window: AggregationWindow
-    status: str
-
-    @classmethod
-    def from_window(cls, window: AggregationWindow, status: str) -> "AggregationWindowRecord":
-        return cls(window=window, status=status)
 
     @classmethod
     def from_dict(cls, record: dict[str, Any]) -> "AggregationWindowRecord":
+        raw_key = record["aggregation_key"]
         return cls(
             window=AggregationWindow(
                 group=str(record["group"]),
+                aggregation_key=AggregationKey(
+                    kind=str(raw_key["kind"]),
+                    value=str(raw_key["value"]),
+                ),
                 start_block=int(record["start_block"]),
                 end_block=int(record["end_block"]),
                 event_names=frozenset(str(name) for name in record["event_names"]),
-            ),
-            status=str(record["status"]),
+                events=tuple(Event.from_dict(event) for event in record["events"]),
+            )
         )
 
     @property
@@ -334,15 +321,28 @@ class AggregationWindowRecord:
     def to_dict(self) -> dict[str, Any]:
         return {
             "group": self.window.group,
+            "aggregation_key": {
+                "kind": self.window.aggregation_key.kind,
+                "value": self.window.aggregation_key.value,
+            },
             "start_block": int(self.window.start_block),
             "end_block": int(self.window.end_block),
             "event_names": sorted(self.window.event_names),
-            "status": self.status,
+            "events": [event.to_dict() for event in self.window.events],
         }
 
     @staticmethod
     def key_for(window: AggregationWindow) -> str:
-        return f"{window.group}:{window.start_block}:{window.end_block}"
+        return json.dumps(
+            [
+                window.group,
+                window.aggregation_key.kind,
+                window.aggregation_key.value,
+                window.start_block,
+                window.end_block,
+            ],
+            separators=(",", ":"),
+        )
 
 
 class BotStorage:
