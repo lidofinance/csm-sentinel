@@ -60,6 +60,7 @@ class Subscription:
             event_sources=self._event_sources,
             abi_by_topics=self._abi_by_topics,
             request_interval_seconds=self._request_interval_from_config(),
+            block_batch_size=self.cfg.block_batch_size,
             stop_event=self._shutdown_event,
             provider_connected_message="Web3 backfill provider connected",
         )
