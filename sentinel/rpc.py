@@ -7,6 +7,8 @@ from web3 import AsyncWeb3, WebSocketProvider
 from web3.utils.subscriptions import (
     LogsSubscription,
     LogsSubscriptionContext,
+    NewHeadsSubscription,
+    NewHeadsSubscriptionContext,
 )
 
 from sentinel.app.health import HealthState
@@ -20,11 +22,18 @@ from sentinel.rpc_provider import (
     RpcAvailabilityError,
     RpcSubscriptionReconnectRequired,
 )
+from sentinel.utils import normalize_block_number
 from sentinel.web3_events import build_event_bindings, decode_event, log_filter_for_source
 from sentinel.web3_event_log_reader import Web3EventLogReader
 
 logger = logging.getLogger(__name__)
 logging.getLogger("web3.providers.persistent.subscription_manager").setLevel(logging.WARNING)
+
+
+def _subscription_item_sort_key(item: Event | Block) -> tuple[int, int, int, int]:
+    if isinstance(item, Event):
+        return (item.block, 0, item.transaction_index, item.log_index)
+    return (item.number, 1, 0, 0)
 
 
 class RawEventConsumer(Protocol):
@@ -67,7 +76,7 @@ class Subscription:
         self._event_consumers: list[RawEventConsumer] = []
         self._block_consumers: list[BlockConsumer] = []
         self._ignore_subscription_events_until_block = ignore_subscription_events_until_block
-        self._buffered_subscription_events: list[Event] | None = None
+        self._buffered_subscription_items: list[Event | Block] | None = None
         self._health = health
 
     def add_event_consumer(self, consumer: RawEventConsumer) -> None:
@@ -147,7 +156,7 @@ class Subscription:
             return
         try:
             w3 = await self._connected_w3()
-            await w3.subscription_manager.subscribe(self._build_log_subscriptions())
+            await w3.subscription_manager.subscribe(self._build_subscriptions())
             logger.info("Subscriptions started")
             self._subscriptions_started.set()
             self._health.mark_subscription_active()
@@ -176,16 +185,17 @@ class Subscription:
                 threshold or 0,
                 suppress_live_events_until,
             )
-        previous_buffer = self._buffered_subscription_events
-        self._buffered_subscription_events = []
+        previous_buffer = self._buffered_subscription_items
+        self._buffered_subscription_items = []
         completed = False
         try:
             await self._replay_blocks(start_block, end_block=end_block)
             completed = True
         finally:
             if completed and not self._shutdown_event.is_set():
-                await self._flush_buffered_subscription_events()
-            self._buffered_subscription_events = previous_buffer
+                await self._flush_buffered_subscription_items(previous_buffer)
+            else:
+                self._buffered_subscription_items = previous_buffer
 
     async def _replay_blocks(self, start_block: int, end_block: int | None = None):
         w3 = await self._event_log_reader.connected_w3()
@@ -248,8 +258,16 @@ class Subscription:
         self._health.mark_progress()
         await self._emit_subscription_event(event)
 
-    def _build_log_subscriptions(self) -> list[LogsSubscription]:
-        subscriptions = []
+    async def _handle_new_head_subscription(self, context: NewHeadsSubscriptionContext):
+        result = cast(dict[str, Any], context.result)
+        head_number = normalize_block_number(result["number"])
+        if head_number <= 0:
+            return
+        self._health.mark_progress()
+        await self._emit_subscription_block(Block(number=head_number - 1))
+
+    def _build_subscriptions(self) -> list[Any]:
+        subscriptions: list[Any] = []
         for source in self._event_sources:
             filter_params = log_filter_for_source(source, self._abi_by_topics)
             if filter_params is None:
@@ -260,12 +278,19 @@ class Subscription:
 
             kwargs: dict[str, Any] = {
                 "handler": self._handle_event_log_subscription,
+                "parallelize": False,
                 **filter_params,
             }
             if handler_context:
                 kwargs["handler_context"] = handler_context
 
             subscriptions.append(LogsSubscription(**kwargs))
+        subscriptions.append(
+            NewHeadsSubscription(
+                handler=self._handle_new_head_subscription,
+                parallelize=False,
+            )
+        )
         return subscriptions
 
     async def _emit_event(self, event: Event):
@@ -292,22 +317,44 @@ class Subscription:
         threshold = self._ignore_subscription_events_until_block
         if threshold is not None and event.block <= threshold:
             return
-        if self._buffered_subscription_events is not None:
-            self._buffered_subscription_events.append(event)
+        if self._buffered_subscription_items is not None:
+            self._buffered_subscription_items.append(event)
             return
         await self._emit_event(event)
 
-    async def _flush_buffered_subscription_events(self) -> None:
-        while self._buffered_subscription_events:
-            events = sorted(
-                self._buffered_subscription_events,
-                key=lambda event: (event.block, event.transaction_index, event.log_index),
-            )
-            self._buffered_subscription_events.clear()
-            for event in events:
+    async def _emit_subscription_block(self, block: Block) -> None:
+        """Mark the block before a new head as complete after its logs were delivered."""
+
+        if self._shutdown_event.is_set():
+            return
+        threshold = self._ignore_subscription_events_until_block
+        if threshold is not None and block.number <= threshold:
+            return
+        if self._buffered_subscription_items is not None:
+            self._buffered_subscription_items.append(block)
+            return
+        await self._emit_block(block)
+
+    async def _flush_buffered_subscription_items(
+        self,
+        previous_buffer: list[Event | Block] | None,
+    ) -> None:
+        while True:
+            buffered_items = self._buffered_subscription_items
+            if not buffered_items or self._shutdown_event.is_set():
+                self._buffered_subscription_items = previous_buffer
+                return
+
+            items = sorted(buffered_items, key=_subscription_item_sort_key)
+            buffered_items.clear()
+            for item in items:
                 if self._shutdown_event.is_set():
+                    self._buffered_subscription_items = previous_buffer
                     return
-                await self._emit_event(event)
+                if isinstance(item, Event):
+                    await self._emit_event(item)
+                else:
+                    await self._emit_block(item)
 
 
 class LoggingConsumer:

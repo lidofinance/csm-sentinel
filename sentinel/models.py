@@ -3,6 +3,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from eth_typing import ChecksumAddress
+from eth_utils import to_checksum_address
 from hexbytes import HexBytes
 
 
@@ -24,6 +25,37 @@ class Event:
     def readable(self):
         args = ", ".join(f"{key}={value}" for key, value in self.args.items())
         return f"{self.event}({args})"
+
+    @property
+    def log_identity(self) -> tuple[str, str, int]:
+        return (
+            self.address.lower(),
+            self.tx.to_0x_hex(),
+            self.log_index,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "event": self.event,
+            "args": dict(self.args),
+            "block": int(self.block),
+            "tx": self.tx.to_0x_hex(),
+            "address": str(self.address),
+            "log_index": int(self.log_index),
+            "transaction_index": int(self.transaction_index),
+        }
+
+    @classmethod
+    def from_dict(cls, record: dict[str, Any]) -> "Event":
+        return cls(
+            event=str(record["event"]),
+            args=dict(record["args"]),
+            block=int(record["block"]),
+            tx=HexBytes(record["tx"]),
+            address=to_checksum_address(record["address"]),
+            log_index=int(record["log_index"]),
+            transaction_index=int(record["transaction_index"]),
+        )
 
 
 @dataclasses.dataclass

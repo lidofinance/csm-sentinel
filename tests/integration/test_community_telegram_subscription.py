@@ -69,7 +69,9 @@ async def _exercise_event(
                     tx_hash=tx_hash,
                 )
                 if aggregation_window_blocks is not None:
-                    await mine_anvil_blocks(anvil.http_url, aggregation_window_blocks - 1)
+                    # Live heads complete the preceding block so all logs from the
+                    # window end are accumulated before its notification is emitted.
+                    await mine_anvil_blocks(anvil.http_url, aggregation_window_blocks)
                 assert await _wait_for(
                     lambda: _has_expected_message(
                         harness, event_name=event_name, expected_markdown=expected_markdown

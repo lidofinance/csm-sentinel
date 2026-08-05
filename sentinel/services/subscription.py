@@ -25,7 +25,6 @@ from sentinel.services.aggregation import (
     NotificationSink,
     ProcessingStateProvider,
 )
-from sentinel.services.event_history import Web3EventHistory
 
 logger = logging.getLogger(__name__)
 logging.getLogger("web3.providers.WebSocketProvider").setLevel(logging.WARNING)
@@ -62,13 +61,13 @@ class ModuleRuntime:
             )
         await self.event_side_effects.process_event(event)
         await self.aggregation.handle_event(event)
-        self._advance_block(event.block)
 
     async def handle_block(self, block: Block) -> None:
+        await self.aggregation.handle_block(block.number)
         self._advance_block(block.number)
 
-    def resume_pending_aggregations(self) -> None:
-        self.aggregation.resume_pending()
+    async def resume_pending_aggregations(self) -> None:
+        await self.aggregation.resume_pending()
 
     async def close(self) -> None:
         await self.aggregation.close()
@@ -110,14 +109,8 @@ def build_module_runtime(
 
     event_messages = module_adapter.build_event_messages()
     event_side_effects = ModuleEventSideEffects(module_adapter)
-    event_history = Web3EventHistory(
-        backfill_w3 or w3,
-        module_adapter=module_adapter,
-    )
     aggregation = AggregationCoordinator(
         storage=storage,
-        event_history=event_history,
-        block_reader=raw_subscription,
         notification_sink=notification_sink,
         aggregators=module_adapter.event_aggregators(),
     )
@@ -252,7 +245,7 @@ class ModuleRuntimeSupervisor:
 
     async def _subscribe_until_restarted_or_stopped(self) -> bool:
         raw_subscription = self.raw_subscription
-        self.module_runtime.resume_pending_aggregations()
+        await self.module_runtime.resume_pending_aggregations()
         self._module_runtime_restarted.clear()
         raw_subscription_task = asyncio.create_task(raw_subscription.subscribe())
         restart_task = asyncio.create_task(self._module_runtime_restarted.wait())
@@ -331,7 +324,7 @@ class ModuleRuntimeSupervisor:
         self, exc: BaseException, *, reason: str = "rpc_disconnect"
     ) -> None:
         previous_runtime = self.module_runtime
-        replay_start_block = max(self._storage.state.block.value, 1)
+        replay_start_block = max(self._storage.state.block.value + 1, 1)
         logger.warning(
             "RPC connection lost; rebuilding subscription runtime and replaying from block %s: %s",
             replay_start_block,

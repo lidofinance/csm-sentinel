@@ -624,19 +624,3 @@ def test_build_event_bindings_preserves_source_event_filter_intent():
 
     assert bindings.event_sources[0].event_names is None
     assert bindings.event_sources[1].event_names == frozenset()
-
-
-@pytest.mark.asyncio
-async def test_web3_event_history_fetches_configured_reader_range():
-    from sentinel.services.event_history import Web3EventHistory
-
-    history = Web3EventHistory.__new__(Web3EventHistory)
-    history._event_log_reader = SimpleNamespace(fetch_events=AsyncMock(return_value=[]))
-
-    events = await history.fetch_events(1, 2)
-
-    assert events == []
-    history._event_log_reader.fetch_events.assert_awaited_once_with(
-        start_block=1,
-        end_block=2,
-    )
