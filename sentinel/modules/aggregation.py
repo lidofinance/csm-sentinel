@@ -1,7 +1,7 @@
+from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
 from dataclasses import replace
-from typing import Protocol
 
 from sentinel.models import Event, EventNotification
 from sentinel.modules.formatting import read_field
@@ -55,24 +55,62 @@ class AggregationGroups:
 @dataclass(frozen=True, slots=True)
 class AggregationWindow:
     group: str
+    aggregation_key: "AggregationKey"
     start_block: int
     end_block: int
     event_names: frozenset[str]
+    events: tuple[Event, ...] = ()
 
     def contains(self, block: int) -> bool:
         return self.start_block <= block <= self.end_block
 
+    def with_event(self, event: Event) -> "AggregationWindow":
+        if any(stored_event.log_identity == event.log_identity for stored_event in self.events):
+            return self
+        return replace(self, events=(*self.events, event))
+
 
 @dataclass(frozen=True, slots=True)
-class NodeOperatorEventAggregator:
+class AggregationKey:
+    kind: str
+    value: str
+
+    @classmethod
+    def global_key(cls) -> "AggregationKey":
+        return cls(kind="global", value="all")
+
+
+class EventAggregator(ABC):
     group: AggregationGroup
     event_names: frozenset[str]
 
-    def window_for(self, block: int) -> AggregationWindow:
+    @abstractmethod
+    def aggregation_key(self, event: Event) -> AggregationKey: ...
+
+    @abstractmethod
+    def window_for(self, event: Event) -> AggregationWindow: ...
+
+    @abstractmethod
+    def aggregate(self, events: Iterable[Event]) -> list[EventNotification]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class NodeOperatorEventAggregator(EventAggregator):
+    group: AggregationGroup
+    event_names: frozenset[str]
+
+    def aggregation_key(self, event: Event) -> AggregationKey:
+        return AggregationKey(
+            kind="node_operator",
+            value=str(event.args["nodeOperatorId"]),
+        )
+
+    def window_for(self, event: Event) -> AggregationWindow:
         return AggregationWindow(
             group=self.group.name,
-            start_block=block,
-            end_block=block + self.window_blocks - 1,
+            aggregation_key=self.aggregation_key(event),
+            start_block=event.block,
+            end_block=event.block + self.window_blocks - 1,
             event_names=self.event_names,
         )
 
@@ -98,17 +136,8 @@ class NodeOperatorEventAggregator:
         return notifications
 
 
-class EventAggregator(Protocol):
-    group: AggregationGroup
-    event_names: frozenset[str]
-
-    def window_for(self, block: int) -> AggregationWindow: ...
-
-    def aggregate(self, events: Iterable[Event]) -> list[EventNotification]: ...
-
-
 @dataclass(frozen=True, slots=True)
-class OperatorGroupChangeAggregator:
+class OperatorGroupChangeAggregator(EventAggregator):
     group: AggregationGroup = AggregationGroups.OPERATOR_GROUP_CHANGES
     event_names: frozenset[str] = frozenset(
         {
@@ -120,11 +149,15 @@ class OperatorGroupChangeAggregator:
         }
     )
 
-    def window_for(self, block: int) -> AggregationWindow:
+    def aggregation_key(self, event: Event) -> AggregationKey:
+        return AggregationKey.global_key()
+
+    def window_for(self, event: Event) -> AggregationWindow:
         return AggregationWindow(
             group=self.group.name,
-            start_block=block,
-            end_block=block + self.group.window_blocks - 1,
+            aggregation_key=self.aggregation_key(event),
+            start_block=event.block,
+            end_block=event.block + self.group.window_blocks - 1,
             event_names=self.event_names,
         )
 

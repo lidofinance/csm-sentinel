@@ -9,7 +9,7 @@ from sentinel.app.storage import (
     normalise_node_operator_ids,
     normalise_node_operator_map,
 )
-from sentinel.modules.aggregation import AggregationWindow
+from sentinel.modules.aggregation import AggregationKey, AggregationWindow
 
 
 # _ensure_int_set
@@ -253,6 +253,7 @@ def test_aggregation_window_store_persists_plain_records_and_restores_pending():
     storage = BotStorage(bot_data)
     window = AggregationWindow(
         group="total_signing_key_counts",
+        aggregation_key=AggregationKey(kind="node_operator", value="42"),
         start_block=100,
         end_block=102,
         event_names=frozenset({"A", "B"}),
@@ -261,40 +262,61 @@ def test_aggregation_window_store_persists_plain_records_and_restores_pending():
     storage.aggregation_windows.upsert_pending(window)
 
     assert bot_data["aggregation_windows"] == {
-        "total_signing_key_counts:100:102": {
+        '["total_signing_key_counts","node_operator","42",100,102]': {
             "group": "total_signing_key_counts",
+            "aggregation_key": {"kind": "node_operator", "value": "42"},
             "start_block": 100,
             "end_block": 102,
             "event_names": ["A", "B"],
-            "status": "pending",
+            "events": [],
         }
     }
     assert BotStorage(bot_data).aggregation_windows.pending() == [window]
-    assert storage.aggregation_windows.contains_active("total_signing_key_counts", 101)
+    assert (
+        storage.aggregation_windows.pending_for(
+            "total_signing_key_counts",
+            window.aggregation_key,
+            101,
+        )
+        == window
+    )
 
 
-def test_aggregation_window_store_marks_aggregated_and_prunes_old_records():
+def test_aggregation_window_store_discards_completed_record():
     bot_data: dict[str, object] = {}
     store = BotStorage(bot_data).aggregation_windows
-    old_window = AggregationWindow(
+    window = AggregationWindow(
         group="total_signing_key_counts",
+        aggregation_key=AggregationKey(kind="node_operator", value="1"),
         start_block=100,
         end_block=100,
         event_names=frozenset({"A"}),
     )
-    recent_window = AggregationWindow(
-        group="total_signing_key_counts",
-        start_block=200,
-        end_block=200,
-        event_names=frozenset({"A"}),
-    )
 
-    store.mark_aggregated(old_window)
-    store.mark_aggregated(recent_window)
-    store.prune(current_block=230, retain_blocks=128)
+    store.upsert_pending(window)
+    store.discard(window)
 
-    assert not store.contains_active("total_signing_key_counts", 100)
-    assert store.contains_active("total_signing_key_counts", 200)
+    assert store.pending() == []
+    assert bot_data["aggregation_windows"] == {}
+
+
+def test_aggregation_window_store_drops_legacy_records():
+    bot_data = {
+        "aggregation_windows": {
+            "deposits:100:200": {
+                "group": "deposits",
+                "start_block": 100,
+                "end_block": 200,
+                "event_names": ["DepositedSigningKeysCountChanged"],
+                "status": "pending",
+            }
+        }
+    }
+
+    store = BotStorage(bot_data).aggregation_windows
+
+    assert store.pending() == []
+    assert bot_data["aggregation_windows"] == {}
 
 
 # NodeOperatorSubscriptions
