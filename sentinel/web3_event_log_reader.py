@@ -1,9 +1,8 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import suppress
-from typing import Any
-from typing import TypeVar
+from typing import Any, TypeVar, cast
 
 from web3 import AsyncWeb3
 from web3.types import FilterParams
@@ -27,13 +26,17 @@ class Web3EventLogReader:
         event_sources: tuple[EventSource, ...] = (),
         abi_by_topics: dict | None = None,
         request_interval_seconds: float | None,
+        block_batch_size: int | None = None,
         stop_event: asyncio.Event | None = None,
         provider_connected_message: str = "Web3 event log reader provider connected",
     ) -> None:
+        if block_batch_size is not None and block_batch_size < 1:
+            raise ValueError("block_batch_size must be at least 1")
         self._w3 = w3
         self._event_sources = event_sources
         self._abi_by_topics = abi_by_topics or {}
         self._request_interval_seconds = request_interval_seconds
+        self._block_batch_size = block_batch_size
         self._last_request_ts: float | None = None
         self._stop_event = stop_event
         self._provider_connected_message = provider_connected_message
@@ -94,30 +97,36 @@ class Web3EventLogReader:
 
         events: list[Event] = []
         for source in self._event_sources:
-            filter_params = log_filter_for_source(source, self._abi_by_topics)
-            if filter_params is None:
+            source_filter = log_filter_for_source(source, self._abi_by_topics)
+            if source_filter is None:
                 continue
-            filter_params["fromBlock"] = start_block
-            filter_params["toBlock"] = end_block
 
-            logs = await self.get_logs(
-                w3=w3,
-                filter_params=filter_params,
-            )
-            if logs is None:
-                return None
+            for batch_start, batch_end in self._block_ranges(start_block, end_block):
+                filter_params = cast(FilterParams, dict(source_filter))
+                filter_params["fromBlock"] = batch_start
+                filter_params["toBlock"] = batch_end
 
-            for log in logs:
-                event_topic = log["topics"][0]
-                event_abi = self._abi_by_topics.get(event_topic)
-                if event_abi is None:
-                    continue
-                if source.event_names is not None and event_abi["name"] not in source.event_names:
-                    continue
-                event = decode_event(w3, event_abi, log)
-                if source.predicate is not None and not source.predicate(event):
-                    continue
-                events.append(event)
+                logs = await self.get_logs(
+                    w3=w3,
+                    filter_params=filter_params,
+                )
+                if logs is None:
+                    return None
+
+                for log in logs:
+                    event_topic = log["topics"][0]
+                    event_abi = self._abi_by_topics.get(event_topic)
+                    if event_abi is None:
+                        continue
+                    if (
+                        source.event_names is not None
+                        and event_abi["name"] not in source.event_names
+                    ):
+                        continue
+                    event = decode_event(w3, event_abi, log)
+                    if source.predicate is not None and not source.predicate(event):
+                        continue
+                    events.append(event)
 
         return sorted(
             events,
@@ -138,6 +147,11 @@ class Web3EventLogReader:
             return None
         assert logs is not None
         return logs
+
+    def _block_ranges(self, start_block: int, end_block: int) -> Iterator[tuple[int, int]]:
+        batch_size = self._block_batch_size or max(end_block - start_block + 1, 1)
+        for batch_start in range(start_block, end_block + 1, batch_size):
+            yield batch_start, min(batch_start + batch_size - 1, end_block)
 
     async def throttle(self) -> bool:
         if self._request_interval_seconds is None:

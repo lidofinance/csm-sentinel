@@ -23,6 +23,7 @@ class Web3EventHistory:
             event_sources=event_bindings.event_sources,
             abi_by_topics=event_bindings.abi_by_topics,
             request_interval_seconds=self._request_interval_from_config(cfg),
+            block_batch_size=cfg.block_batch_size,
         )
 
     async def fetch_events(self, start_block: int, end_block: int) -> list[Event]:

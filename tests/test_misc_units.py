@@ -298,7 +298,10 @@ async def test_get_block_number_uses_persistent_provider(monkeypatch):
 
     monkeypatch.setattr(
         "sentinel.rpc.get_config",
-        lambda: SimpleNamespace(process_blocks_requests_per_second=None),
+        lambda: SimpleNamespace(
+            process_blocks_requests_per_second=None,
+            block_batch_size=10_000,
+        ),
     )
     subscription = Subscription(
         main_w3,
@@ -454,6 +457,39 @@ async def test_web3_event_log_reader_fetches_source_events_without_subscription(
     assert filter_params["address"] == "0x0000000000000000000000000000000000000002"
     assert filter_params["topics"] == [topic]
     assert [event.log_index for event in events] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_web3_event_log_reader_splits_ranges_for_provider_limits():
+    from sentinel.modules.base import EventSource
+    from sentinel.web3_event_log_reader import Web3EventLogReader
+
+    w3 = SimpleNamespace(
+        provider=SimpleNamespace(
+            is_connected=AsyncMock(return_value=True),
+            connect=AsyncMock(),
+        ),
+        eth=SimpleNamespace(get_logs=AsyncMock(return_value=[])),
+    )
+    reader = Web3EventLogReader(
+        w3,
+        event_sources=(
+            EventSource(
+                "source",
+                "0x0000000000000000000000000000000000000002",
+                None,
+            ),
+        ),
+        request_interval_seconds=None,
+        block_batch_size=2,
+    )
+
+    assert await reader.fetch_events(start_block=10, end_block=14) == []
+
+    assert [
+        (call.args[0]["fromBlock"], call.args[0]["toBlock"])
+        for call in w3.eth.get_logs.await_args_list
+    ] == [(10, 11), (12, 13), (14, 14)]
 
 
 @pytest.mark.asyncio
