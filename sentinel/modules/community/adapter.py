@@ -4,7 +4,6 @@ from typing import ClassVar
 from web3 import AsyncWeb3
 
 from sentinel.app.contracts import (
-    CONTRACT_ABIS_V2,
     CONTRACT_ABIS_V3,
     CommunityContractAddresses,
     CommunityContractABIs,
@@ -47,15 +46,6 @@ COMMUNITY_COMMON_EVENTS = frozenset(
     }
 )
 
-COMMUNITY_V2_ONLY_EVENTS = frozenset(
-    {
-        "ELRewardsStealingPenaltyReported",
-        "ELRewardsStealingPenaltySettled",
-        "ELRewardsStealingPenaltyCancelled",
-        "WithdrawalSubmitted",
-    }
-)
-
 COMMUNITY_V3_ONLY_EVENTS = frozenset(
     {
         "GeneralDelayedPenaltyReported",
@@ -70,15 +60,10 @@ COMMUNITY_V3_ONLY_EVENTS = frozenset(
         "BondLockRemoved",
         "KeyAllocatedBalanceChanged",
         "ValidatorWithdrawn",
-        "Initialized",
     }
 )
 
-COMMUNITY_CATALOG_EVENTS_BY_VERSION: dict[int, frozenset[str]] = {
-    2: COMMUNITY_COMMON_EVENTS | COMMUNITY_V2_ONLY_EVENTS,
-    3: COMMUNITY_COMMON_EVENTS | COMMUNITY_V3_ONLY_EVENTS,
-}
-COMMUNITY_EVENTS = COMMUNITY_COMMON_EVENTS | COMMUNITY_V2_ONLY_EVENTS | COMMUNITY_V3_ONLY_EVENTS
+COMMUNITY_EVENTS = COMMUNITY_COMMON_EVENTS | COMMUNITY_V3_ONLY_EVENTS
 COMMUNITY_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS = frozenset(
     {
         # TODO: re-enable after KeyAllocatedBalanceChanged notifications are batched.
@@ -86,7 +71,7 @@ COMMUNITY_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS = frozenset(
     }
 )
 COMMUNITY_NOTIFIABLE_EVENTS = COMMUNITY_EVENTS - COMMUNITY_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS
-COMMUNITY_SIDE_EFFECT_EVENTS = frozenset({"Initialized", "NodeOperatorAdded"})
+COMMUNITY_SIDE_EFFECT_EVENTS = frozenset({"NodeOperatorAdded"})
 
 
 class CommunityModuleAdapter(BaseModuleAdapter):
@@ -113,13 +98,10 @@ class CommunityModuleAdapter(BaseModuleAdapter):
             contract_abis=contract_abis,
             chain=chain,
         )
-        self.csm_version = addresses.csm_version
 
     @staticmethod
-    def contract_abis_for(addresses: CommunityContractAddresses) -> CommunityContractABIs:
-        if addresses.csm_version == 3:
-            return CONTRACT_ABIS_V3
-        return CONTRACT_ABIS_V2
+    def contract_abis_for(_addresses: CommunityContractAddresses) -> CommunityContractABIs:
+        return CONTRACT_ABIS_V3
 
     @staticmethod
     def build_contracts(
@@ -166,11 +148,7 @@ class CommunityModuleAdapter(BaseModuleAdapter):
         )
 
     def catalog_events(self) -> set[str]:
-        events = COMMUNITY_CATALOG_EVENTS_BY_VERSION.get(
-            self.csm_version,
-            COMMUNITY_CATALOG_EVENTS_BY_VERSION[3],
-        )
-        return set(events - COMMUNITY_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS)
+        return set(COMMUNITY_EVENTS - COMMUNITY_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS)
 
     def notifiable_events(self) -> set[str]:
         return set(COMMUNITY_NOTIFIABLE_EVENTS)
@@ -198,15 +176,10 @@ class CommunityModuleAdapter(BaseModuleAdapter):
 
     def topic_abis(self) -> tuple[list[dict], ...]:
         return (
-            CONTRACT_ABIS_V2.module,
             CONTRACT_ABIS_V3.module,
-            CONTRACT_ABIS_V2.accounting,
             CONTRACT_ABIS_V3.accounting,
-            CONTRACT_ABIS_V2.fee_distributor,
             CONTRACT_ABIS_V3.fee_distributor,
-            CONTRACT_ABIS_V2.vebo,
             CONTRACT_ABIS_V3.vebo,
-            CONTRACT_ABIS_V2.exit_penalties,
             CONTRACT_ABIS_V3.exit_penalties,
         )
 

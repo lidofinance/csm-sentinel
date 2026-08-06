@@ -114,11 +114,26 @@ class AggregationCoordinator:
             aggregation_key,
             event.block,
         )
+        aggregation_started = window is None
         if window is None:
             window = aggregator.window_for(event)
 
         window = window.with_event(event)
         self._aggregation_windows.upsert_pending(window)
+        if aggregation_started:
+            logger.info(
+                "Aggregation started",
+                extra={
+                    "aggregation_group": window.group,
+                    "aggregation_key": {
+                        "kind": window.aggregation_key.kind,
+                        "value": window.aggregation_key.value,
+                    },
+                    "window_start_block": window.start_block,
+                    "window_end_block": window.end_block,
+                    "source_event_count": len(window.events),
+                },
+            )
         return PreparedNotifications([])
 
     async def _flush_ready_windows(self, block: int) -> None:
@@ -157,6 +172,21 @@ class AggregationCoordinator:
             )
             if prepared is not None:
                 await self._emit_prepared(prepared)
+                logger.info(
+                    "Aggregation flushed",
+                    extra={
+                        "aggregation_group": window.group,
+                        "aggregation_key": {
+                            "kind": window.aggregation_key.kind,
+                            "value": window.aggregation_key.value,
+                        },
+                        "window_start_block": window.start_block,
+                        "window_end_block": window.end_block,
+                        "processed_block": block,
+                        "source_event_count": len(window.events),
+                        "notification_count": len(prepared.notifications),
+                    },
+                )
 
     async def _aggregate_window(
         self,
