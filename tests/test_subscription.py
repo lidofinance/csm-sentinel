@@ -537,6 +537,49 @@ async def test_module_runtime_queues_non_aggregated_event_notification():
 
 
 @pytest.mark.asyncio
+async def test_module_runtime_logs_processed_event_and_aggregation_lifecycle(caplog):
+    event = _make_signing_keys_event(
+        event_name=DEPOSITED_SIGNING_KEYS_COUNT_CHANGED,
+        count=1,
+        block=123,
+        log_index=1,
+    )
+    harness = _make_processing_harness(
+        aggregation_group=AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS,
+        event_names=frozenset({DEPOSITED_SIGNING_KEYS_COUNT_CHANGED}),
+    )
+    window_end = event.block + AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks - 1
+
+    with caplog.at_level("INFO"):
+        await harness.runtime.handle_event(event)
+        await harness.runtime.handle_block(Block(number=window_end))
+
+    processed = next(
+        record for record in caplog.records if record.getMessage() == "Event processed"
+    )
+    assert processed.event_name == DEPOSITED_SIGNING_KEYS_COUNT_CHANGED
+    assert processed.block == event.block
+    assert processed.log_index == event.log_index
+
+    started = next(
+        record for record in caplog.records if record.getMessage() == "Aggregation started"
+    )
+    assert started.aggregation_group == AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.name
+    assert started.aggregation_key == {"kind": "node_operator", "value": "1"}
+    assert started.window_start_block == event.block
+    assert started.window_end_block == window_end
+    assert started.source_event_count == 1
+
+    flushed = next(
+        record for record in caplog.records if record.getMessage() == "Aggregation flushed"
+    )
+    assert flushed.processed_block == window_end
+    assert flushed.source_event_count == 1
+    assert flushed.notification_count == 1
+    harness.sink.emit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_subscription_catchup_suppresses_duplicate_live_events_only():
     try:
         subscription = _make_raw_subscription()
@@ -1322,6 +1365,54 @@ async def test_handle_event_log_does_not_advance_persisted_block():
     await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
 
     assert context.bot_storage.block.value == 100
+
+
+@pytest.mark.asyncio
+async def test_notification_log_is_emitted_only_with_sent_messages(caplog):
+    sub = _make_notification_handler(event_messages_return=None)
+    context = _make_context(block=100)
+
+    with caplog.at_level("INFO", logger="sentinel.app.telegram_adapters"):
+        await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
+
+    assert not any(
+        record.getMessage().startswith("Notification handled on the block")
+        for record in caplog.records
+    )
+    assert not any(record.getMessage().startswith("Messages sent:") for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_notification_log_includes_messages_sent_count(caplog):
+    plan = NotificationPlan(broadcast="Test notification")
+    sub = _make_notification_handler(event_messages_return=plan)
+    context = SimpleNamespace(
+        bot_storage=BotStorage(
+            {
+                "block": 100,
+                "user_ids": {100},
+                "group_ids": set(),
+                "channel_ids": set(),
+                "no_ids_to_chats": {},
+            }
+        ),
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    with caplog.at_level("INFO", logger="sentinel.app.telegram_adapters"):
+        await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
+
+    handled = next(
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Notification handled on the block")
+    )
+    assert "Messages sent: 1" in handled.getMessage()
+    assert handled.event_name == "TestEvent"
+    assert handled.block == 200
+    assert handled.source_event_count == 1
+    assert handled.sent_messages == 1
+    context.bot.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -61,6 +61,15 @@ class ModuleRuntime:
             )
         await self.event_side_effects.process_event(event)
         await self.aggregation.handle_event(event)
+        logger.info(
+            "Event processed",
+            extra={
+                "event_name": event.event,
+                "block": event.block,
+                "transaction_index": event.transaction_index,
+                "log_index": event.log_index,
+            },
+        )
 
     async def handle_block(self, block: Block) -> None:
         await self.aggregation.handle_block(block.number)
