@@ -2,21 +2,16 @@ import asyncio
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
-from dataclasses import replace
 import signal
 from typing import TYPE_CHECKING, Callable
 
 from web3 import AsyncWeb3
 
-from sentinel.app.contracts import discover_contract_addresses, log_discovered_addresses
 from sentinel.app.health import HealthState
-from sentinel.app.module_adapter import build_module_adapter_from_config
 from sentinel.chain import SharedChainConnection
 from sentinel.config import Config
-from sentinel.config import set_config
 from sentinel.models import Block, Event
 from sentinel.metrics.registry import DEFAULT_METRICS
-from sentinel.modules.community.adapter import CommunityModuleAdapter
 from sentinel.modules.side_effects import ModuleEventSideEffects
 from sentinel.rpc import Subscription
 from sentinel.rpc_provider import RpcAvailabilityError
@@ -37,13 +32,6 @@ if TYPE_CHECKING:
     from sentinel.notifications import EventMessageEngine
 
 
-class CsmVersionUpgradeRequired(Exception):
-    def __init__(self, *, block: int, version: int) -> None:
-        self.block = block
-        self.version = version
-        super().__init__(f"CSM runtime must be rebuilt for version {version}")
-
-
 @dataclass(frozen=True, slots=True)
 class ModuleRuntime:
     module_adapter: "ModuleAdapter"
@@ -54,13 +42,17 @@ class ModuleRuntime:
     aggregation: AggregationCoordinator
 
     async def handle_event(self, event: Event) -> None:
-        if _is_csm_version_upgrade_event(self.module_adapter, event):
-            raise CsmVersionUpgradeRequired(
-                block=event.block,
-                version=int(event.args["version"]),
-            )
         await self.event_side_effects.process_event(event)
         await self.aggregation.handle_event(event)
+        logger.info(
+            "Event processed",
+            extra={
+                "event_name": event.event,
+                "block": event.block,
+                "transaction_index": event.transaction_index,
+                "log_index": event.log_index,
+            },
+        )
 
     async def handle_block(self, block: Block) -> None:
         await self.aggregation.handle_block(block.number)
@@ -75,18 +67,6 @@ class ModuleRuntime:
     def _advance_block(self, block_number: int) -> None:
         state = self.storage.state
         state.block.update(max(state.block.value, block_number))
-
-
-def _is_csm_version_upgrade_event(module_adapter: "ModuleAdapter", event: Event) -> bool:
-    if not isinstance(module_adapter, CommunityModuleAdapter):
-        return False
-    if module_adapter.csm_version >= 3:
-        return False
-    if event.event != "Initialized":
-        return False
-    if int(event.args.get("version", 0)) != 3:
-        return False
-    return event.address.lower() == module_adapter.addresses.module.lower()
 
 
 def build_module_runtime(
@@ -183,47 +163,6 @@ class ModuleRuntimeSupervisor:
     def cfg(self):
         return self._config
 
-    async def _handle_module_upgrade(
-        self,
-        upgrade: CsmVersionUpgradeRequired,
-    ) -> int:
-        previous_runtime = self.module_runtime
-        replay_start_block = max(upgrade.block, 1)
-        checkpoint = replay_start_block - 1
-
-        logger.info(
-            "CSM v%s upgrade detected at block %s; rebuilding module runtime",
-            upgrade.version,
-            upgrade.block,
-        )
-        previous_runtime.raw_subscription.request_shutdown()
-        self._storage.state.block.update(checkpoint)
-        await previous_runtime.close()
-
-        contract_addresses = await discover_contract_addresses(
-            self._chain.w3,
-            self._config.contract_addresses.module,
-        )
-        log_discovered_addresses(contract_addresses)
-        cfg = replace(self._config, contract_addresses=contract_addresses)
-        module_adapter = build_module_adapter_from_config(cfg, self._chain.w3, self._chain)
-        if (
-            isinstance(module_adapter, CommunityModuleAdapter)
-            and module_adapter.csm_version < upgrade.version
-        ):
-            raise RuntimeError(
-                f"Discovered CSM v{module_adapter.csm_version}; "
-                f"expected at least v{upgrade.version}"
-            )
-
-        set_config(cfg)
-        self._config = cfg
-        self._install_module_runtime(self._new_module_runtime(module_adapter))
-        self._module_runtime_restarted.set()
-
-        logger.info("Module runtime rebuilt after CSM v%s upgrade", upgrade.version)
-        return replay_start_block
-
     def ensure_state_containers(self) -> None:
         self._storage.state
 
@@ -261,13 +200,10 @@ class ModuleRuntimeSupervisor:
                 )
                 if restart_task in done:
                     await raw_subscription.stop()
-                    with suppress(CsmVersionUpgradeRequired):
-                        await raw_subscription_task
+                    await raw_subscription_task
                     return True
                 if raw_subscription_task in done:
-                    return await self._handle_subscription_result(
-                        raw_subscription, raw_subscription_task
-                    )
+                    return await self._handle_subscription_result(raw_subscription_task)
                 await subscribed_task
                 try:
                     await self._replay_pending_blocks_after_restart()
@@ -283,10 +219,9 @@ class ModuleRuntimeSupervisor:
             )
             if restart_task in done:
                 await raw_subscription.stop()
-                with suppress(CsmVersionUpgradeRequired):
-                    await raw_subscription_task
+                await raw_subscription_task
                 return True
-            return await self._handle_subscription_result(raw_subscription, raw_subscription_task)
+            return await self._handle_subscription_result(raw_subscription_task)
         finally:
             for task in (subscribed_task, raw_subscription_task, restart_task):
                 if task is None or task.done():
@@ -297,16 +232,10 @@ class ModuleRuntimeSupervisor:
 
     async def _handle_subscription_result(
         self,
-        raw_subscription: Subscription,
         raw_subscription_task: asyncio.Task[None],
     ) -> bool:
         try:
             await raw_subscription_task
-        except CsmVersionUpgradeRequired as upgrade:
-            replay_start_block = await self._handle_module_upgrade(upgrade)
-            self._pending_replay_start_block = replay_start_block
-            await raw_subscription.stop()
-            return True
         except RpcAvailabilityError as exc:
             if self._shutdown_requested:
                 return False
@@ -381,9 +310,6 @@ class ModuleRuntimeSupervisor:
                         suppress_live_events_until=catchup_head,
                     )
                     return
-                except CsmVersionUpgradeRequired as upgrade:
-                    replay_start_block = await self._handle_module_upgrade(upgrade)
-                    await self.wait_until_subscribed()
                 except RpcAvailabilityError as exc:
                     if self._shutdown_requested:
                         return

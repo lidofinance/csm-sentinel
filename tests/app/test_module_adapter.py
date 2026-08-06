@@ -4,10 +4,10 @@ import pytest
 from types import SimpleNamespace
 
 from sentinel.app.contracts import (
+    CONTRACT_ABIS_V3,
     CommunityContractAddresses,
     ContractAddresses,
     CuratedContractAddresses,
-    get_contract_abis,
 )
 from sentinel.app.module_adapter import build_module_adapter_from_addresses
 from sentinel.chain import SharedChainConnection
@@ -110,7 +110,7 @@ def _dummy_addresses(module_type: ModuleType) -> ContractAddresses:
             **common_kwargs,
             meta_registry="0x0000000000000000000000000000000000000009",
         )
-    return CommunityContractAddresses(**common_kwargs, csm_version=3)
+    return CommunityContractAddresses(**common_kwargs)
 
 
 def _dummy_contracts() -> CommunityModuleContracts:
@@ -137,12 +137,12 @@ def test_community_module_adapter_instantiation():
     result = CommunityModuleAdapter(
         addresses=addresses,
         contracts=contracts,
-        contract_abis=get_contract_abis(addresses.csm_version),
+        contract_abis=CONTRACT_ABIS_V3,
         module_ui_url=None,
         chain=_dummy_chain(),
     )
     assert result.module_type == ModuleType.COMMUNITY
-    assert result.side_effect_events() == {"Initialized", "NodeOperatorAdded"}
+    assert result.side_effect_events() == {"NodeOperatorAdded"}
 
 
 def test_curated_module_adapter_instantiation():
@@ -245,7 +245,7 @@ async def test_community_module_adapter_discovers_module_id_after_startup():
     adapter = CommunityModuleAdapter(
         addresses=addresses,
         contracts=replace(_dummy_contracts(), staking_router=staking_router),
-        contract_abis=get_contract_abis(addresses.csm_version),
+        contract_abis=CONTRACT_ABIS_V3,
         module_ui_url=None,
         chain=_FakeChain(),
     )
@@ -264,7 +264,7 @@ def test_adapter_build_event_list_text_filters_catalog_events():
         texts = CommunityTexts
 
         def catalog_events(self) -> set[str]:
-            return {"Initialized"}
+            return {"BondCurveSet"}
 
     addresses = _dummy_addresses(ModuleType.COMMUNITY)
     assert isinstance(addresses, CommunityContractAddresses)
@@ -272,57 +272,34 @@ def test_adapter_build_event_list_text_filters_catalog_events():
     limited = LimitedAdapter(
         addresses=addresses,
         contracts=contracts,
-        contract_abis=get_contract_abis(addresses.csm_version),
+        contract_abis=CONTRACT_ABIS_V3,
         module_ui_url="https://example.invalid",
         chain=_dummy_chain(),
     )
 
     text = limited.build_event_list_text()
-    assert "CSM v3 launched" in text
+    assert "Node Operator type changed" in text
     assert "Keys were deposited" not in text
 
 
-def test_community_module_adapter_catalog_events_change_with_csm_version():
-    addresses_v2 = CommunityContractAddresses(
-        module="0x0000000000000000000000000000000000000001",
-        accounting="0x0000000000000000000000000000000000000002",
-        parameters_registry="0x0000000000000000000000000000000000000003",
-        fee_distributor="0x0000000000000000000000000000000000000004",
-        exit_penalties="0x0000000000000000000000000000000000000005",
-        lido_locator="0x0000000000000000000000000000000000000006",
-        staking_router="0x0000000000000000000000000000000000000007",
-        vebo="0x0000000000000000000000000000000000000008",
-        staking_module_id=1,
-        module_type=ModuleType.COMMUNITY,
-        csm_version=2,
-    )
-    addresses_v3 = _dummy_addresses(ModuleType.COMMUNITY)
-    assert isinstance(addresses_v3, CommunityContractAddresses)
-
+def test_community_module_adapter_uses_v3_catalog_and_abis():
+    addresses = _dummy_addresses(ModuleType.COMMUNITY)
+    assert isinstance(addresses, CommunityContractAddresses)
     contracts = _dummy_contracts()
-    adapter_v2 = CommunityModuleAdapter(
-        addresses=addresses_v2,
+    adapter = CommunityModuleAdapter(
+        addresses=addresses,
         contracts=contracts,
-        contract_abis=get_contract_abis(addresses_v2.csm_version),
-        module_ui_url=None,
-        chain=_dummy_chain(),
-    )
-    adapter_v3 = CommunityModuleAdapter(
-        addresses=addresses_v3,
-        contracts=contracts,
-        contract_abis=get_contract_abis(addresses_v3.csm_version),
+        contract_abis=CommunityModuleAdapter.contract_abis_for(addresses),
         module_ui_url=None,
         chain=_dummy_chain(),
     )
 
-    assert "ELRewardsStealingPenaltyReported" in adapter_v2.catalog_events()
-    assert "WithdrawalSubmitted" in adapter_v2.catalog_events()
-    assert "Initialized" not in adapter_v2.catalog_events()
-
-    assert "GeneralDelayedPenaltyReported" in adapter_v3.catalog_events()
-    assert "ValidatorWithdrawn" in adapter_v3.catalog_events()
-    assert "Initialized" in adapter_v3.catalog_events()
-    assert "ELRewardsStealingPenaltyReported" not in adapter_v3.catalog_events()
+    assert adapter.contract_abis is CONTRACT_ABIS_V3
+    assert "GeneralDelayedPenaltyReported" in adapter.catalog_events()
+    assert "ValidatorWithdrawn" in adapter.catalog_events()
+    assert "Initialized" not in adapter.catalog_events()
+    assert "ELRewardsStealingPenaltyReported" not in adapter.catalog_events()
+    assert "WithdrawalSubmitted" not in adapter.catalog_events()
 
     new_v3_events = {
         "ValidatorSlashingReported",
@@ -332,10 +309,9 @@ def test_community_module_adapter_catalog_events_change_with_csm_version():
         "FeeSplitsSet",
         "BondLockRemoved",
     }
-    assert new_v3_events.isdisjoint(adapter_v2.catalog_events())
-    assert new_v3_events.issubset(adapter_v3.catalog_events())
-    assert "KeyAllocatedBalanceChanged" not in adapter_v3.catalog_events()
-    assert "KeyAllocatedBalanceChanged" not in adapter_v3.notifiable_events()
+    assert new_v3_events.issubset(adapter.catalog_events())
+    assert "KeyAllocatedBalanceChanged" not in adapter.catalog_events()
+    assert "KeyAllocatedBalanceChanged" not in adapter.notifiable_events()
 
 
 @pytest.mark.asyncio
@@ -351,7 +327,7 @@ async def test_community_module_adapter_validates_operator_ids():
     adapter = CommunityModuleAdapter(
         addresses=addresses,
         contracts=contracts,
-        contract_abis=get_contract_abis(addresses.csm_version),
+        contract_abis=CONTRACT_ABIS_V3,
         module_ui_url=None,
         chain=chain,
     )

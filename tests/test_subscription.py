@@ -38,7 +38,6 @@ from sentinel.modules.aggregation import (
 )
 from sentinel.services.aggregation import AggregationCoordinator
 from sentinel.services.subscription import (
-    CsmVersionUpgradeRequired,
     ModuleRuntime,
     ModuleRuntimeSupervisor,
 )
@@ -91,7 +90,7 @@ class _FakeEventSideEffects:
         self.process_event = AsyncMock()
 
 
-def _make_config(csm_version: int) -> Config:
+def _make_config() -> Config:
     return Config(
         filestorage_path=".storage",
         token="token",
@@ -109,7 +108,6 @@ def _make_config(csm_version: int) -> Config:
             staking_router="0x0000000000000000000000000000000000000008",
             staking_module_id=1,
             module_type=ModuleType.COMMUNITY,
-            csm_version=csm_version,
         ),
         etherscan_url="https://etherscan.io",
         beaconchain_url="https://beaconcha.in",
@@ -125,18 +123,6 @@ def _make_event(block: int) -> Event:
     return Event(
         event="TestEvent",
         args={"nodeOperatorId": 1},
-        block=block,
-        tx=HexBytes("0xdeadbeef"),
-        address="0x0000000000000000000000000000000000000000",
-        log_index=0,
-        transaction_index=0,
-    )
-
-
-def _make_initialized_event(block: int = 1) -> Event:
-    return Event(
-        event="Initialized",
-        args={"version": 3},
         block=block,
         tx=HexBytes("0xdeadbeef"),
         address="0x0000000000000000000000000000000000000000",
@@ -208,7 +194,7 @@ def _make_notification_handler(event_messages_return=None) -> TelegramNotificati
 
 
 def _make_raw_subscription() -> Subscription:
-    set_config(_make_config(csm_version=2))
+    set_config(_make_config())
     return Subscription(
         _FakeRawW3(),
         health=HealthState(),
@@ -298,67 +284,10 @@ def _make_processing_harness(
 
 
 @pytest.mark.asyncio
-async def test_csm_upgrade_rebuilds_module_runtime_and_rewinds_checkpoint():
-    from sentinel.app.module_adapter import build_module_adapter_from_config
-
-    cfg = _make_config(csm_version=2)
-    cfg_v3 = _make_config(csm_version=3)
-    w3 = _FakeW3()
-    set_config(cfg)
-    try:
-        chain = SharedChainConnection(w3)
-        module_adapter = build_module_adapter_from_config(cfg, w3, chain)
-        application = SimpleNamespace(bot_data={}, update_queue=SimpleNamespace(put=AsyncMock()))
-
-        subscription = ModuleRuntimeSupervisor(
-            lambda: w3,
-            config=cfg,
-            chain=chain,
-            health=HealthState(),
-            module_adapter=module_adapter,
-            storage=TelegramProcessingStateProvider(application),
-            notification_sink=TelegramNotificationSink(application),
-        )
-        original_raw_subscription = subscription.raw_subscription
-        original_event_messages = subscription.event_messages
-
-        from unittest.mock import patch
-
-        with patch(
-            "sentinel.services.subscription.discover_contract_addresses",
-            AsyncMock(return_value=cfg_v3.contract_addresses),
-        ):
-            replay_start_block = await subscription._handle_module_upgrade(
-                CsmVersionUpgradeRequired(block=123, version=3),
-            )
-
-        assert replay_start_block == 123
-        assert application.bot_data["block"] == 122
-        assert subscription.cfg.contract_addresses.csm_version == 3
-        assert subscription.raw_subscription is not original_raw_subscription
-        assert subscription.event_messages is not original_event_messages
-        assert subscription.event_messages.cfg.contract_addresses.csm_version == 3
-        assert (
-            subscription.event_messages.module_adapter is subscription.module_runtime.module_adapter
-        )
-        assert "Initialized" in subscription.module_runtime.module_adapter.catalog_events()
-        assert (
-            "ValidatorSlashingReported"
-            in subscription.module_runtime.module_adapter.catalog_events()
-        )
-        assert (
-            "ELRewardsStealingPenaltyReported"
-            not in subscription.module_runtime.module_adapter.catalog_events()
-        )
-    finally:
-        clear_config()
-
-
-@pytest.mark.asyncio
 async def test_rpc_disconnect_rebuilds_runtime_and_replays_after_persisted_block(monkeypatch):
     from sentinel.app.module_adapter import build_module_adapter_from_config
 
-    cfg = _make_config(csm_version=2)
+    cfg = _make_config()
     w3 = _FakeW3()
     replacement_w3 = _FakeW3()
     subscription_w3_factory = Mock(side_effect=[w3, replacement_w3])
@@ -472,46 +401,6 @@ async def test_rpc_disconnect_rebuilds_runtime_and_replays_after_persisted_block
 
 
 @pytest.mark.asyncio
-async def test_module_runtime_interrupts_v2_upgrade_before_side_effects_and_notifications():
-    from sentinel.app.module_adapter import build_module_adapter_from_config
-
-    cfg = _make_config(csm_version=2)
-    w3 = _FakeW3()
-    set_config(cfg)
-    try:
-        module_adapter = build_module_adapter_from_config(cfg, w3, SharedChainConnection(w3))
-        harness = _make_processing_harness(aggregation_group=None, event_names=frozenset())
-        runtime = ModuleRuntime(
-            module_adapter=module_adapter,
-            raw_subscription=cast(Subscription, SimpleNamespace()),
-            storage=harness.storage,
-            event_messages=harness.runtime.event_messages,
-            event_side_effects=harness.side_effects,
-            aggregation=harness.aggregation,
-        )
-        event = Event(
-            event="Initialized",
-            args={"version": 3},
-            block=123,
-            tx=HexBytes("0xdeadbeef"),
-            address=cfg.contract_addresses.module,
-            log_index=0,
-            transaction_index=0,
-        )
-
-        with pytest.raises(CsmVersionUpgradeRequired) as exc_info:
-            await runtime.handle_event(event)
-
-        assert exc_info.value.block == 123
-        assert exc_info.value.version == 3
-        harness.side_effects.process_event.assert_not_awaited()
-        harness.sink.emit.assert_not_awaited()
-        assert harness.storage.state.block.value == 0
-    finally:
-        clear_config()
-
-
-@pytest.mark.asyncio
 async def test_module_runtime_dispatches_side_effects_before_notification_sink():
     harness = _make_processing_harness(aggregation_group=None, event_names=frozenset())
     calls = []
@@ -526,7 +415,7 @@ async def test_module_runtime_dispatches_side_effects_before_notification_sink()
 @pytest.mark.asyncio
 async def test_module_runtime_queues_non_aggregated_event_notification():
     harness = _make_processing_harness(aggregation_group=None, event_names=frozenset())
-    event = _make_initialized_event()
+    event = _make_event(block=1)
 
     await harness.runtime.handle_event(event)
 
@@ -534,6 +423,49 @@ async def test_module_runtime_queues_non_aggregated_event_notification():
     emitted = harness.sink.emit.await_args.args[0]
     assert isinstance(emitted, EventNotification)
     assert emitted.source_events == (event,)
+
+
+@pytest.mark.asyncio
+async def test_module_runtime_logs_processed_event_and_aggregation_lifecycle(caplog):
+    event = _make_signing_keys_event(
+        event_name=DEPOSITED_SIGNING_KEYS_COUNT_CHANGED,
+        count=1,
+        block=123,
+        log_index=1,
+    )
+    harness = _make_processing_harness(
+        aggregation_group=AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS,
+        event_names=frozenset({DEPOSITED_SIGNING_KEYS_COUNT_CHANGED}),
+    )
+    window_end = event.block + AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks - 1
+
+    with caplog.at_level("INFO"):
+        await harness.runtime.handle_event(event)
+        await harness.runtime.handle_block(Block(number=window_end))
+
+    processed = next(
+        record for record in caplog.records if record.getMessage() == "Event processed"
+    )
+    assert processed.event_name == DEPOSITED_SIGNING_KEYS_COUNT_CHANGED
+    assert processed.block == event.block
+    assert processed.log_index == event.log_index
+
+    started = next(
+        record for record in caplog.records if record.getMessage() == "Aggregation started"
+    )
+    assert started.aggregation_group == AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.name
+    assert started.aggregation_key == {"kind": "node_operator", "value": "1"}
+    assert started.window_start_block == event.block
+    assert started.window_end_block == window_end
+    assert started.source_event_count == 1
+
+    flushed = next(
+        record for record in caplog.records if record.getMessage() == "Aggregation flushed"
+    )
+    assert flushed.processed_block == window_end
+    assert flushed.source_event_count == 1
+    assert flushed.notification_count == 1
+    harness.sink.emit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -709,7 +641,7 @@ async def test_replay_blocks_keeps_suppressing_delayed_live_duplicates():
 
 
 @pytest.mark.asyncio
-async def test_replay_blocks_discards_buffered_live_events_when_upgrade_interrupts():
+async def test_replay_blocks_discards_buffered_live_events_when_replay_fails():
     try:
         subscription = _make_raw_subscription()
         consumer = SimpleNamespace(handle_event=AsyncMock())
@@ -725,11 +657,11 @@ async def test_replay_blocks_discards_buffered_live_events_when_upgrade_interrup
             async def fetch_events(self, *, start_block: int, end_block: int):
                 assert (start_block, end_block) == (100, 100)
                 await subscription._emit_subscription_event(live_event)
-                raise CsmVersionUpgradeRequired(block=100, version=3)
+                raise RuntimeError("replay interrupted")
 
         subscription._event_log_reader = FakeEventLogReader()
 
-        with pytest.raises(CsmVersionUpgradeRequired):
+        with pytest.raises(RuntimeError, match="replay interrupted"):
             await subscription.replay_blocks(100, 100, suppress_live_events_until=100)
 
         consumer.handle_event.assert_not_awaited()
@@ -1245,7 +1177,7 @@ async def test_unknown_persisted_aggregation_window_is_discarded(caplog):
 async def test_pending_aggregation_uses_replaced_application_bot_data():
     from sentinel.app.module_adapter import build_module_adapter_from_config
 
-    cfg = _make_config(csm_version=2)
+    cfg = _make_config()
     w3 = _FakeW3()
     set_config(cfg)
     try:
@@ -1322,6 +1254,54 @@ async def test_handle_event_log_does_not_advance_persisted_block():
     await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
 
     assert context.bot_storage.block.value == 100
+
+
+@pytest.mark.asyncio
+async def test_notification_log_is_emitted_only_with_sent_messages(caplog):
+    sub = _make_notification_handler(event_messages_return=None)
+    context = _make_context(block=100)
+
+    with caplog.at_level("INFO", logger="sentinel.app.telegram_adapters"):
+        await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
+
+    assert not any(
+        record.getMessage().startswith("Notification handled on the block")
+        for record in caplog.records
+    )
+    assert not any(record.getMessage().startswith("Messages sent:") for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_notification_log_includes_messages_sent_count(caplog):
+    plan = NotificationPlan(broadcast="Test notification")
+    sub = _make_notification_handler(event_messages_return=plan)
+    context = SimpleNamespace(
+        bot_storage=BotStorage(
+            {
+                "block": 100,
+                "user_ids": {100},
+                "group_ids": set(),
+                "channel_ids": set(),
+                "no_ids_to_chats": {},
+            }
+        ),
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    with caplog.at_level("INFO", logger="sentinel.app.telegram_adapters"):
+        await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
+
+    handled = next(
+        record
+        for record in caplog.records
+        if record.getMessage().startswith("Notification handled on the block")
+    )
+    assert "Messages sent: 1" in handled.getMessage()
+    assert handled.event_name == "TestEvent"
+    assert handled.block == 200
+    assert handled.source_event_count == 1
+    assert handled.sent_messages == 1
+    context.bot.send_message.assert_awaited_once()
 
 
 @pytest.mark.asyncio

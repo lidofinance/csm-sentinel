@@ -107,21 +107,6 @@ COMMUNITY_EVENT_CATALOG: list[EventDefinition] = [
         group_title=EventGroup.ADDRESS_AND_REWARD_CHANGES,
     ),
     EventDefinition(
-        name="ELRewardsStealingPenaltyReported",
-        description="- 🚨 Penalty for stealing EL rewards reported",
-        group_title=EventGroup.SLASHING_AND_STEALING,
-    ),
-    EventDefinition(
-        name="ELRewardsStealingPenaltySettled",
-        description="- 🚨 EL rewards stealing penalty confirmed and applied",
-        group_title=EventGroup.SLASHING_AND_STEALING,
-    ),
-    EventDefinition(
-        name="ELRewardsStealingPenaltyCancelled",
-        description="- 😮‍💨 Cancelled penalty for stealing EL rewards",
-        group_title=EventGroup.SLASHING_AND_STEALING,
-    ),
-    EventDefinition(
         name="GeneralDelayedPenaltyReported",
         description="- 🚨 General delayed penalty reported",
         group_title=EventGroup.SLASHING_AND_STEALING,
@@ -182,11 +167,6 @@ COMMUNITY_EVENT_CATALOG: list[EventDefinition] = [
         group_title=EventGroup.WITHDRAWAL_AND_EXIT,
     ),
     EventDefinition(
-        name="WithdrawalSubmitted",
-        description="- 👀 Key withdrawal information submitted",
-        group_title=EventGroup.WITHDRAWAL_AND_EXIT,
-    ),
-    EventDefinition(
         name="ValidatorWithdrawn",
         description="- 👀 Validator withdrawal confirmed",
         group_title=EventGroup.WITHDRAWAL_AND_EXIT,
@@ -194,11 +174,6 @@ COMMUNITY_EVENT_CATALOG: list[EventDefinition] = [
     EventDefinition(
         name="DistributionLogUpdated",
         description="- 📈 New rewards distributed",
-        group_title=EventGroup.COMMON_CSM,
-    ),
-    EventDefinition(
-        name="Initialized",
-        description="- 🎉 CSM v3 launched",
         group_title=EventGroup.COMMON_CSM,
     ),
 ]
@@ -324,45 +299,6 @@ def deposited_signing_keys_count_changed(count, count_before):
         nl(),
         "Deposited keys count: ",
         Code(f"{count_before} -> {count}"),
-    )
-
-
-@register_event_message("ELRewardsStealingPenaltyCancelled")
-def el_rewards_stealing_penalty_cancelled(remaining):
-    return markdown(
-        "😮‍💨 ",
-        Bold("EL rewards stealing penalty cancelled"),
-        nl(),
-        "Remaining amount: ",
-        Code(remaining),
-    )
-
-
-@register_event_message("ELRewardsStealingPenaltyReported")
-def el_rewards_stealing_penalty_reported(rewards, block_link):
-    return markdown(
-        "🚨 ",
-        Bold("Penalty for stealing EL rewards reported"),
-        nl(),
-        Code(rewards),
-        " rewards from the ",
-        TextLink("block", url=block_link),
-        " were transferred to the wrong EL address",
-        nl(1),
-        "See the ",
-        TextLink("guide", url="https://docs.lido.fi/staking-modules/csm/guides/mev-stealing"),
-        " for more details",
-    )
-
-
-@register_event_message("ELRewardsStealingPenaltySettled")
-def el_rewards_stealing_penalty_settled(burnt):
-    return markdown(
-        "🚨 ",
-        Bold("EL rewards stealing penalty confirmed and applied"),
-        nl(),
-        Code(burnt),
-        " burnt from bond",
     )
 
 
@@ -645,23 +581,6 @@ def vetted_signing_keys_count_decreased():
         "Consider removing invalid keys. Check ",
         TextLink("CSM UI", url=cfg.module_ui_url or ""),
         " for more details",
-    )
-
-
-@register_event_message("WithdrawalSubmitted")
-def withdrawal_submitted(key, key_url, amount):
-    cfg = get_config()
-    return markdown(
-        "👀 ",
-        Bold("Information about validator withdrawal has been submitted"),
-        nl(),
-        "Withdrawn key: ",
-        TextLink(key, url=key_url),
-        " with exit balance: ",
-        Code(amount),
-        nl(),
-        "Check the amount of the bond released at ",
-        TextLink("CSM UI", url=cfg.module_ui_url or ""),
     )
 
 
@@ -1001,16 +920,3 @@ def target_validators_count_changed(
                 nl(1),
                 f"Limit changed from {limit_before} to {limit_after}.",
             )
-
-
-@register_event_message("Initialized")
-def initialized():
-    cfg = get_config()
-    return markdown(
-        "🎉 ",
-        Bold("CSM v3 is live!"),
-        nl(),
-        "Check the ",
-        TextLink("CSM UI", url=cfg.module_ui_url or ""),
-        " for updated operator workflows and current module details.",
-    )

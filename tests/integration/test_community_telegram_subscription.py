@@ -8,7 +8,6 @@ from sentinel.config import get_config, clear_config
 from sentinel.modules.aggregation import BLOCKS_PER_DAY
 
 from .helpers import (
-    build_module_supervisor,
     build_subscription,
     mine_anvil_blocks,
     replay_transaction_on_anvil,
@@ -125,53 +124,6 @@ def _has_expected_message(harness, *, event_name: str, expected_markdown: str | 
     return expected_markdown in messages
 
 
-async def test_process_live_initialized_v3_upgrade_rebuilds_runtime(anvil_launcher):
-    anvil = await anvil_launcher(2722010)
-    harness = await build_module_supervisor(anvil.ws_url, anvil.http_url)
-    subscription_task: asyncio.Task | None = None
-    expected_markdown = (
-        "🎉 *CSM v3 is live\\!*\n\n"
-        "Check the [CSM UI](https://csm.lido.fi) "
-        "for updated operator workflows and current module details\\.\n\n"
-        "[Transaction](https://etherscan.io/tx/0xdeadbeef)"
-    )
-
-    try:
-        assert harness.supervisor.module_runtime.module_adapter.csm_version == 2
-        cfg = get_config()
-        subscription_task = asyncio.create_task(harness.subscribe())
-        await harness.wait_until_subscribed()
-
-        await replay_transaction_on_anvil(
-            fork_provider_url=cfg.web3_socket_providers[0],
-            anvil_http_url=anvil.http_url,
-            tx_hash="0xcccb19dcb5e0695cb15ce08894d64cf4b304c794f20b48995855f4e8e48d50cb",
-        )
-
-        assert await _wait_for(
-            lambda: (
-                harness.supervisor.module_runtime.module_adapter.csm_version == 3
-                and _has_expected_message(
-                    harness,
-                    event_name="Initialized",
-                    expected_markdown=expected_markdown,
-                )
-            ),
-            timeout=15.0,
-        ), (
-            "Did not process Hoodi CSM v3 Initialized upgrade, "
-            f"csm_version={harness.supervisor.module_runtime.module_adapter.csm_version}, "
-            f"found={[plan.broadcast if plan else None for event, plan in harness.processed_events]}"
-        )
-    finally:
-        await harness.stop()
-        await harness.disconnect()
-        if subscription_task:
-            subscription_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await subscription_task
-
-
 @pytest.fixture(params=[True, False], ids=["via_subscription", "via_process_blocks"])
 def via_subscription(request) -> bool:
     return request.param
@@ -188,57 +140,6 @@ async def test_process_blocks_deposited_signing_keys_count_changed(
         anvil_launcher=anvil_launcher,
         via_subscription=via_subscription,
         aggregation_window_blocks=BLOCKS_PER_DAY,
-    )
-
-
-async def test_process_blocks_el_rewards_stealing_penalty_cancelled(
-    anvil_launcher, via_subscription
-):
-    await _exercise_event(
-        event_name="ELRewardsStealingPenaltyCancelled",
-        fork_block=1129167,
-        tx_hash="0xfdee52932e34aee4065258ab4f0a5cb5477c4ea24e10ce54a5389e11899fcf68",
-        expected_markdown="😮‍💨 *EL rewards stealing penalty cancelled*\n\nRemaining amount: `0\\.05 ether`\n\nnodeOperatorId: 1\n[Transaction](https://etherscan.io/tx/0xdeadbeef)",
-        anvil_launcher=anvil_launcher,
-        via_subscription=via_subscription,
-    )
-
-
-async def test_process_blocks_el_rewards_stealing_penalty_reported(
-    anvil_launcher, via_subscription
-):
-    await _exercise_event(
-        event_name="ELRewardsStealingPenaltyReported",
-        fork_block=1129139,
-        tx_hash="0x8e3882c7d5f778140e2e2faf0c4f9557e2e9de62e2af970e6479788b6ffe0b9e",
-        expected_markdown="🚨 *Penalty for stealing EL rewards reported*\n\n`2 ether` rewards from the [block](https://etherscan.io/block/0xe16e65e99b2a99e8d13fb574c50bea9f703eab51c858d7e692bf7fc8423b6c2c) were transferred to the wrong EL address\nSee the [guide](https://docs.lido.fi/staking-modules/csm/guides/mev-stealing) for more details\n\nnodeOperatorId: 0\n[Transaction](https://etherscan.io/tx/0xdeadbeef)",
-        anvil_launcher=anvil_launcher,
-        via_subscription=via_subscription,
-    )
-
-
-@pytest.mark.skip(
-    reason="TODO: investigate ELRewardsStealingPenaltySettled replay and update tx hash"
-)
-async def test_process_blocks_el_rewards_stealing_penalty_settled(anvil_launcher, via_subscription):
-    # TODO: investigate why the historical replay fails with "nonce too low" and
-    #       update the transaction hash or replay logic before reenabling.
-    await _exercise_event(
-        event_name="ELRewardsStealingPenaltySettled",
-        fork_block=1267596,
-        tx_hash="0xd9389ba64cb14fecbec82b9d06ac3cd20615eb0993e7e5507731794bb3c7b79e",
-        expected_markdown=(
-            "👀 *Information about validator withdrawal has been submitted*\n\n"
-            "Withdrawn key: "
-            "[0x977315543bdc050474b4ee90c8cebd7d196d9b622ceb105d87c22a682b23747a8550659451a3f88ad155464b8f6a70f0]"
-            "(https://beaconcha.in/validator/0x977315543bdc050474b4ee90c8cebd7d196d9b622ceb105d87c22a682b23747a8550659451a3f88ad155464b8f6a70f0) "
-            "with exit balance: `31\\.995429281 ether`\n\n"
-            "Check the amount of the bond released at [CSM UI](https://csm.lido.fi)\n\n"
-            "nodeOperatorId: 12\n"
-            "[Transaction](https://etherscan.io/tx/0xdeadbeef)"
-        ),
-        anvil_launcher=anvil_launcher,
-        via_subscription=via_subscription,
     )
 
 
@@ -322,26 +223,6 @@ async def test_process_blocks_vetted_signing_keys_count_decreased(anvil_launcher
         fork_block=1270156,
         tx_hash="0xbcbb7713a51ec2d3d93a4a693908f01afca482501474d80239602b3dcc42a231",
         expected_markdown="🚨 *Invalid or duplicated keys has been uploaded*\n\nConsider removing invalid keys\\. Check [CSM UI](https://csm.lido.fi) for more details\n\nnodeOperatorId: 296\n[Transaction](https://etherscan.io/tx/0xdeadbeef)",
-        anvil_launcher=anvil_launcher,
-        via_subscription=via_subscription,
-    )
-
-
-async def test_process_blocks_withdrawal_submitted(anvil_launcher, via_subscription):
-    await _exercise_event(
-        event_name="WithdrawalSubmitted",
-        fork_block=1267596,
-        tx_hash="0xa32f3975d6f68a4968c770888529fc66b25dfebbafa9581dad3ccb8c84d546e2",
-        expected_markdown=(
-            "👀 *Information about validator withdrawal has been submitted*\n\n"
-            "Withdrawn key: "
-            "[0x977315543bdc050474b4ee90c8cebd7d196d9b622ceb105d87c22a682b23747a8550659451a3f88ad155464b8f6a70f0]"
-            "(https://beaconcha.in/validator/0x977315543bdc050474b4ee90c8cebd7d196d9b622ceb105d87c22a682b23747a8550659451a3f88ad155464b8f6a70f0) "
-            "with exit balance: `31\\.995429281 ether`\n\n"
-            "Check the amount of the bond released at [CSM UI](https://csm.lido.fi)\n\n"
-            "nodeOperatorId: 12\n"
-            "[Transaction](https://etherscan.io/tx/0xdeadbeef)"
-        ),
         anvil_launcher=anvil_launcher,
         via_subscription=via_subscription,
     )

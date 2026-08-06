@@ -59,13 +59,18 @@ async def test_secret_rotation_job_stops_subscription_on_new_version(tmp_path: P
         request_shutdown=Mock(),
         raw_subscription=SimpleNamespace(stop=AsyncMock()),
     )
-    context = SimpleNamespace(runtime=SimpleNamespace(module_supervisor=supervisor))
+    job = SimpleNamespace(schedule_removal=Mock())
+    context = SimpleNamespace(
+        job=job,
+        runtime=SimpleNamespace(module_supervisor=supervisor),
+    )
     job_context = JobContext(
         _make_subscription(),
         secret_bundle=SecretBundle(secrets, 1),
     )
 
     assert await job_context._check_secret_rotation(context) is True
+    job.schedule_removal.assert_called_once_with()
     supervisor.request_shutdown.assert_called_once_with()
     supervisor.raw_subscription.stop.assert_awaited_once_with()
 

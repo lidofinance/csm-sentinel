@@ -141,7 +141,6 @@ def _config(provider_urls: tuple[str, ...]) -> Config:
         vebo="0x0000000000000000000000000000000000000008",
         staking_module_id=1,
         module_type=ModuleType.COMMUNITY,
-        csm_version=3,
     )
     return Config(
         filestorage_path=".storage",

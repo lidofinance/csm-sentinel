@@ -76,68 +76,11 @@ class CommunityEventMessages(BaseModule):
             return event_block_footer_tx_only(block_links).as_markdown()
         return event_block_footer(node_operator_id, block_links).as_markdown()
 
-    @register_event("ELRewardsStealingPenaltyCancelled")
-    async def el_rewards_stealing_penalty_cancelled(self, event: EventNotification):
-        template = self._require_message_template(event.event)
-        remaining_amount = humanize_wei(
-            await self.accounting.functions.getActualLockedBond(event.args["nodeOperatorId"]).call(
-                block_identifier=event.block
-            )
-        )
-        return template(remaining_amount) + await self.notification_footer(event)
-
-    @register_event("ELRewardsStealingPenaltyReported")
-    async def el_rewards_stealing_penalty_reported(self, event: EventNotification):
-        template = self._require_message_template(event.event)
-        block_hash = self.to_hex(event.args["proposedBlockHash"])
-        block_template = self._require_template(
-            self.cfg.etherscan_block_url_template, "ETHERSCAN_URL"
-        )
-        block_link = block_template.format(block_hash)
-        return template(
-            humanize_wei(event.args["stolenAmount"]), block_link
-        ) + await self.notification_footer(event)
-
-    @register_event("ELRewardsStealingPenaltySettled")
-    async def el_rewards_stealing_penalty_settled(self, event: EventNotification):
-        template = self._require_message_template(event.event)
-        logs = await self.accounting.events.BondBurned().get_logs(
-            from_block=event.block, to_block=event.block
-        )
-        burnt_event = next(
-            filter(lambda x: x.args["nodeOperatorId"] == event.args["nodeOperatorId"], logs), None
-        )
-        if burnt_event:
-            amount = burnt_event.args["burnedAmount"]
-        else:
-            amount = 0
-        return template(humanize_wei(amount)) + await self.notification_footer(event)
-
-    @register_event("WithdrawalSubmitted")
-    async def withdrawal_submitted(self, event: EventNotification):
-        # TODO add exit penalties applied
-        template = self._require_message_template(event.event)
-        key = self.to_hex(
-            await self.module.functions.getSigningKeys(
-                event.args["nodeOperatorId"], event.args["keyIndex"], 1
-            ).call(block_identifier=event.block)
-        )
-        beacon_template = self._require_template(
-            self.cfg.beaconchain_url_template, "BEACONCHAIN_URL"
-        )
-        key_url = beacon_template.format(key)
-        return template(
-            key, key_url, humanize_wei(event.args["amount"])
-        ) + await self.notification_footer(event)
-
     @register_event("ValidatorExitDelayProcessed")
     async def validator_exit_delay_processed(self, event: EventNotification):
         template = self._require_message_template(event.event)
         key, key_url = self.validator_link(event.args["pubkey"])
-        penalty_amount = (
-            event.args["delayPenalty"] if "delayPenalty" in event.args else event.args["delayFee"]
-        )
-        penalty = humanize_wei(penalty_amount)
+        penalty = humanize_wei(event.args["delayFee"])
         return template(key, key_url, penalty) + await self.notification_footer(event)
 
     @register_event("TargetValidatorsCountChanged")
@@ -158,15 +101,6 @@ class CommunityEventMessages(BaseModule):
             event.args["targetValidatorsCount"],
             active_validators_count,
         ) + await self.notification_footer(event)
-
-    @register_event("Initialized")
-    async def initialized(self, event: EventNotification):
-        template = self._require_message_template(event.event)
-        if event.args["version"] != 3:
-            return None
-        if event.address.lower() != self.module_address.lower():
-            return None
-        return template() + await self.notification_footer(event)
 
 
 register_event(

@@ -45,7 +45,6 @@ class TelegramNotificationHandler:
         self._event_messages_provider = event_messages_provider
 
     async def handle_event_log(self, event: EventNotification, context: "BotContext"):
-        logger.info("Handle event on the block %s: %s", event.block, event.readable())
         bot_storage = context.bot_storage
         actual_chat_ids = bot_storage.actual_chat_ids()
         node_operator_chats = bot_storage.node_operator_chats
@@ -102,7 +101,18 @@ class TelegramNotificationHandler:
                     logger.error("Error sending message to chat %s: %s", chat, exc)
 
         if sent_messages:
-            logger.info("Messages sent: %s", sent_messages)
+            logger.info(
+                "Notification handled on the block %s: %s; Messages sent: %s",
+                event.block,
+                event.readable(),
+                sent_messages,
+                extra={
+                    "event_name": event.event,
+                    "block": event.block,
+                    "source_event_count": len(event.source_events),
+                    "sent_messages": sent_messages,
+                },
+            )
 
     def register_handlers(self) -> None:
         """Attach type handlers for event updates to the application."""

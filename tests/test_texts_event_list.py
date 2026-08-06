@@ -3,14 +3,14 @@ from sentinel.modules.curated.texts import build_event_list_text as build_curate
 
 
 def test_build_event_list_text_for_common_group():
-    catalog_events = {"Initialized"}
+    catalog_events = {"DistributionLogUpdated"}
     text = build_event_list_text(catalog_events)
     expected = (
         "Here is the list of events you will receive notifications for:\n"
         "A 🚨 means urgent action is required from you\n"
         "\n"
         "*Common CSM Events for all the Node Operators:*\n"
-        "\\- 🎉 CSM v3 launched\n"
+        "\\- 📈 New rewards distributed\n"
         "\n"
         "\n"
     )
