@@ -13,7 +13,7 @@ or use a [community-supported public instance](https://github.com/lidofinance/sm
 
 The bot discovers the module type from `MODULE_ADDRESS` on startup and wires the matching notification adapter automatically:
 
-- **Community Staking Module (CSM):** supports CSM v2 and v3 contracts, including automatic v3 switching after the module is initialized.
+- **Community Staking Module (CSM):** supports CSM v3 contracts.
 - **Curated Module:** supports Curated Module events, MetaRegistry-based Node Operator labels, operator group notifications, and Curated-specific follow/unfollow buttons.
 
 For CSM, subscriptions are managed by Node Operator ID. For Curated, the bot also shows Node Operator labels from the MetaRegistry when they are available.

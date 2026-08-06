@@ -35,7 +35,6 @@ def fake_contract_addresses():
             vebo="0x0000000000000000000000000000000000000008",
             staking_module_id=3,
             module_type=ModuleType.COMMUNITY,
-            csm_version=2,
         )
 
     return _make

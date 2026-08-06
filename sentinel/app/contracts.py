@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from eth_typing import ChecksumAddress
-import web3.exceptions
 from web3 import AsyncWeb3, WebSocketProvider
 
 from sentinel.module_types import ModuleType, decode_module_type
@@ -22,29 +21,22 @@ def _load_abi(name: str, *, version: int | None = None) -> list[dict]:
         return json.load(fh)
 
 
-MODULE_ABI_V2 = _load_abi("CSModuleV2.json")
 MODULE_ABI_V3 = _load_abi("CSModule.json", version=3)
 CURATED_MODULE_ABI = _load_abi("CuratedModule.json", version=3)
 META_REGISTRY_ABI = _load_abi("MetaRegistry.json", version=3)
 
-ACCOUNTING_ABI_V2 = _load_abi("CSAccountingV2.json")
 ACCOUNTING_ABI_V3 = _load_abi("CSAccounting.json", version=3)
 
-FEE_DISTRIBUTOR_ABI_V2 = _load_abi("CSFeeDistributorV2.json")
 FEE_DISTRIBUTOR_ABI_V3 = _load_abi("CSFeeDistributor.json", version=3)
 
-EXIT_PENALTIES_ABI_V2 = _load_abi("CSExitPenalties.json")
 EXIT_PENALTIES_ABI_V3 = _load_abi("CSExitPenalties.json", version=3)
 
-PARAMETERS_REGISTRY_ABI_V2 = _load_abi("CSParametersRegistry.json")
 PARAMETERS_REGISTRY_ABI_V3 = _load_abi("CSParametersRegistry.json", version=3)
 
 VEBO_ABI = _load_abi("VEBO.json")
 
-LIDO_LOCATOR_ABI_V2 = _load_abi("LidoLocator.json")
 LIDO_LOCATOR_ABI_V3 = _load_abi("LidoLocator.json", version=3)
 
-STAKING_ROUTER_ABI_V2 = _load_abi("StakingRouter.json")
 STAKING_ROUTER_ABI_V3 = _load_abi("StakingRouter.json", version=3)
 
 
@@ -73,17 +65,6 @@ class CuratedContractABIs(BaseContractABIs):
 ContractABIs = CommunityContractABIs | CuratedContractABIs
 
 
-CONTRACT_ABIS_V2 = CommunityContractABIs(
-    module=MODULE_ABI_V2,
-    accounting=ACCOUNTING_ABI_V2,
-    parameters_registry=PARAMETERS_REGISTRY_ABI_V2,
-    fee_distributor=FEE_DISTRIBUTOR_ABI_V2,
-    exit_penalties=EXIT_PENALTIES_ABI_V2,
-    lido_locator=LIDO_LOCATOR_ABI_V2,
-    staking_router=STAKING_ROUTER_ABI_V2,
-    vebo=VEBO_ABI,
-)
-
 CONTRACT_ABIS_V3 = CommunityContractABIs(
     module=MODULE_ABI_V3,
     accounting=ACCOUNTING_ABI_V3,
@@ -106,12 +87,6 @@ CURATED_CONTRACT_ABIS = CuratedContractABIs(
     staking_router=STAKING_ROUTER_ABI_V3,
     vebo=VEBO_ABI,
 )
-
-
-def get_contract_abis(csm_version: int) -> CommunityContractABIs:
-    if csm_version == 3:
-        return CONTRACT_ABIS_V3
-    return CONTRACT_ABIS_V2
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,10 +119,7 @@ class BaseContractAddresses:
 
 @dataclass(frozen=True, slots=True)
 class CommunityContractAddresses(BaseContractAddresses):
-    csm_version: int
-
-    def as_dict(self) -> dict[str, str | int | None]:
-        return BaseContractAddresses.as_dict(self) | {"csm_version": self.csm_version}
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,7 +142,7 @@ async def discover_contract_addresses(w3: AsyncWeb3, module_address: str) -> Con
     checksum = w3.to_checksum_address
     module_contract = w3.eth.contract(
         address=checksum(module_address),
-        abi=CONTRACT_ABIS_V2.module,
+        abi=CONTRACT_ABIS_V3.module,
         decode_tuples=True,
     )
 
@@ -185,14 +157,14 @@ async def discover_contract_addresses(w3: AsyncWeb3, module_address: str) -> Con
 
     locator = w3.eth.contract(
         address=checksum(_ensure_address(lido_locator, "LIDO_LOCATOR")),
-        abi=CONTRACT_ABIS_V2.lido_locator,
+        abi=CONTRACT_ABIS_V3.lido_locator,
     )
     vebo = await locator.functions.validatorsExitBusOracle().call()
     staking_router = await locator.functions.stakingRouter().call()
 
     staking_router_contract = w3.eth.contract(
         address=checksum(_ensure_address(staking_router, "stakingRouter")),
-        abi=CONTRACT_ABIS_V2.staking_router,
+        abi=CONTRACT_ABIS_V3.staking_router,
     )
     modules = await staking_router_contract.functions.getStakingModules().call()
 
@@ -232,7 +204,6 @@ async def discover_contract_addresses(w3: AsyncWeb3, module_address: str) -> Con
             meta_registry=checksum(_ensure_address(meta_registry, "META_REGISTRY()")),
         )
     else:
-        csm_version = await _discover_csm_version(module_contract)
         addresses = CommunityContractAddresses(
             module=module_checksum,
             accounting=accounting_checksum,
@@ -244,7 +215,6 @@ async def discover_contract_addresses(w3: AsyncWeb3, module_address: str) -> Con
             vebo=vebo_checksum,
             staking_module_id=module_id,
             module_type=module_type,
-            csm_version=csm_version,
         )
 
     return addresses
@@ -254,14 +224,6 @@ def _ensure_address(raw_address: str, source: str) -> str:
     if not raw_address or raw_address == ZERO_ADDRESS:
         raise RuntimeError(f"Failed to discover address from {source}")
     return raw_address
-
-
-async def _discover_csm_version(module_contract) -> int:
-    try:
-        version = int(await module_contract.functions.getInitializedVersion().call())
-        return 3 if version >= 3 else 2
-    except (web3.exceptions.Web3Exception, ValueError):
-        return 2
 
 
 async def _discover_meta_registry(w3: AsyncWeb3, module_address: str) -> str:

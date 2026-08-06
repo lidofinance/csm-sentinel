@@ -1639,13 +1639,12 @@ async def test_curated_bond_curve_weight_set_skips_unassigned_curve():
     assert accounting.curve_id_calls == [0, 1, 2]
 
 
-def test_subscription_decodes_v2_and_v3_transition_events():
+def test_subscription_uses_v3_event_bindings_only():
     from web3 import AsyncWeb3
 
     from sentinel.app.contracts import CommunityContractAddresses
     from sentinel.app.module_adapter import build_module_adapter_from_config
     from sentinel.module_types import ModuleType
-    from sentinel.modules.community.adapter import COMMUNITY_CATALOG_EVENTS_BY_VERSION
     from sentinel.web3_events import build_event_bindings
 
     cfg = SimpleNamespace(
@@ -1660,7 +1659,6 @@ def test_subscription_decodes_v2_and_v3_transition_events():
             staking_router="0x0000000000000000000000000000000000000008",
             staking_module_id=1,
             module_type=ModuleType.COMMUNITY,
-            csm_version=2,
         ),
         module_ui_url=None,
         process_blocks_requests_per_second=None,
@@ -1670,32 +1668,33 @@ def test_subscription_decodes_v2_and_v3_transition_events():
         w3 = AsyncWeb3()
         module_adapter = build_module_adapter_from_config(cfg, w3, SharedChainConnection(w3))
         event_bindings = build_event_bindings(module_adapter)
-        assert "Initialized" not in COMMUNITY_CATALOG_EVENTS_BY_VERSION[2]
         decoded_event_names = {
             event_abi["name"] for event_abi in event_bindings.abi_by_topics.values()
         }
-        assert "Initialized" in decoded_event_names
-        assert "ELRewardsStealingPenaltyReported" in decoded_event_names
+        assert "Initialized" not in decoded_event_names
+        assert "ELRewardsStealingPenaltyReported" not in decoded_event_names
+        assert "WithdrawalSubmitted" not in decoded_event_names
+        assert "GeneralDelayedPenaltyReported" in decoded_event_names
         assert "ValidatorSlashingReported" in decoded_event_names
         assert "KeyAllocatedBalanceChanged" not in decoded_event_names
     finally:
         clear_config()
 
 
-def test_topics_to_follow_deduplicates_compatible_v2_v3_topics():
+def test_topics_to_follow_deduplicates_compatible_event_topics():
     from sentinel.web3_events import topics_to_follow
 
-    v2_event = {
+    first_event = {
         "type": "event",
         "name": "ValidatorExitDelayProcessed",
         "inputs": [
             {"name": "nodeOperatorId", "type": "uint256", "indexed": True},
             {"name": "pubkey", "type": "bytes", "indexed": False},
-            {"name": "delayPenalty", "type": "uint256", "indexed": False},
+            {"name": "delayFee", "type": "uint256", "indexed": False},
         ],
         "anonymous": False,
     }
-    v3_event = {
+    second_event = {
         "type": "event",
         "name": "ValidatorExitDelayProcessed",
         "inputs": [
@@ -1706,11 +1705,11 @@ def test_topics_to_follow_deduplicates_compatible_v2_v3_topics():
         "anonymous": False,
     }
 
-    topics = topics_to_follow({"ValidatorExitDelayProcessed"}, [v2_event], [v3_event])
+    topics = topics_to_follow({"ValidatorExitDelayProcessed"}, [first_event], [second_event])
 
     assert len(topics) == 1
     [event_abi] = topics.values()
-    assert event_abi["inputs"][2]["name"] == "delayPenalty"
+    assert event_abi["inputs"][2]["name"] == "delayFee"
 
 
 def test_topics_to_follow_rejects_incompatible_same_topic_abis():
@@ -1731,94 +1730,6 @@ def test_topics_to_follow_rejects_incompatible_same_topic_abis():
 
     with pytest.raises(RuntimeError, match="incompatible ABI inputs"):
         topics_to_follow({"SameTopic"}, [indexed_event], [non_indexed_event])
-
-
-@pytest.mark.asyncio
-async def test_initialized_control_event_renders_v3_notification():
-    from sentinel.modules.community.events import CommunityEventMessages
-    from sentinel.notifications import NotificationPlan
-    from sentinel.models import Event
-
-    class DummyAdapter:
-        csm_version = 2
-
-        def catalog_events(self):
-            return set()
-
-        def notifiable_events(self):
-            return {"Initialized"}
-
-    set_config(SimpleNamespace(module_ui_url="https://csm.lido.fi"))
-    try:
-        event_messages = CommunityEventMessages.__new__(CommunityEventMessages)
-        event_messages.chain = _DummyConnectProvider()
-        event_messages.cfg = SimpleNamespace(etherscan_tx_url_template="https://etherscan.io/tx/{}")
-        event_messages.module_adapter = DummyAdapter()
-        event_messages.module_address = "0x0000000000000000000000000000000000000abc"
-
-        event = Event(
-            event="Initialized",
-            args={"version": 3},
-            block=1,
-            tx=HexBytes("0xdeadbeef"),
-            address="0x0000000000000000000000000000000000000abc",
-            log_index=0,
-            transaction_index=0,
-        )
-
-        plan = await CommunityEventMessages.get_notification_plan(
-            event_messages, _notification(event)
-        )
-
-        assert isinstance(plan, NotificationPlan)
-        assert "CSM v3 is live" in plan.broadcast
-    finally:
-        clear_config()
-
-
-@pytest.mark.asyncio
-async def test_get_notification_plan_allows_v2_historical_event_with_v3_adapter():
-    from sentinel.modules.community.events import CommunityEventMessages
-    from sentinel.notifications import NotificationPlan
-    from sentinel.models import Event
-    from sentinel.modules.community.adapter import COMMUNITY_NOTIFIABLE_EVENTS
-
-    class DummyAdapter:
-        csm_version = 3
-
-        def catalog_events(self):
-            return {"Initialized"}
-
-        def notifiable_events(self):
-            return COMMUNITY_NOTIFIABLE_EVENTS
-
-    event_messages = CommunityEventMessages.__new__(CommunityEventMessages)
-    event_messages.chain = _DummyConnectProvider()
-    event_messages.cfg = SimpleNamespace(
-        etherscan_block_url_template="https://etherscan.io/block/{}",
-        etherscan_tx_url_template="https://etherscan.io/tx/{}",
-    )
-    event_messages.module_adapter = DummyAdapter()
-
-    event = Event(
-        event="ELRewardsStealingPenaltyReported",
-        args={
-            "nodeOperatorId": 321,
-            "stolenAmount": 10**18,
-            "proposedBlockHash": HexBytes("0x" + "12" * 32),
-        },
-        block=1,
-        tx=HexBytes("0xdeadbeef"),
-        address="0x0000000000000000000000000000000000000000",
-        log_index=0,
-        transaction_index=0,
-    )
-
-    plan = await CommunityEventMessages.get_notification_plan(event_messages, _notification(event))
-
-    assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids == {"321"}
-    assert "Penalty for stealing EL rewards reported" in plan.broadcast
 
 
 @pytest.mark.asyncio
@@ -2047,37 +1958,6 @@ async def test_validator_exit_delay_processed_accepts_v3_delay_fee_arg():
 
 
 @pytest.mark.asyncio
-async def test_validator_exit_delay_processed_keeps_v2_delay_penalty_arg():
-    from sentinel.modules.community.events import CommunityEventMessages
-    from sentinel.models import Event
-
-    event_messages = CommunityEventMessages.__new__(CommunityEventMessages)
-    event_messages.chain = _DummyConnectProvider()
-    event_messages.cfg = SimpleNamespace(
-        beaconchain_url_template="https://beaconcha.in/validator/{}",
-        etherscan_tx_url_template="https://etherscan.io/tx/{}",
-    )
-
-    event = Event(
-        event="ValidatorExitDelayProcessed",
-        args={"nodeOperatorId": 42, "pubkey": bytes.fromhex("1234"), "delayPenalty": 10**18},
-        block=1,
-        tx=HexBytes("0xdeadbeef"),
-        address="0x0000000000000000000000000000000000000000",
-        log_index=0,
-        transaction_index=0,
-    )
-
-    message = await CommunityEventMessages.validator_exit_delay_processed(
-        event_messages, _notification(event)
-    )
-
-    assert "Validator exit delay processed" in message
-    assert "[0x1234](https://beaconcha.in/validator/0x1234)" in message
-    assert "Delay penalty: `1 ether`" in message
-
-
-@pytest.mark.asyncio
 async def test_key_allocated_balance_changed_handler_humanizes_balance():
     from sentinel.modules.community.events import CommunityEventMessages
     from sentinel.models import Event
@@ -2200,74 +2080,3 @@ async def test_total_signing_keys_count_changed_handler_renders_aggregated_event
         "Blocks: [123](https://etherscan.io/block/123) \\.\\.\\. [125](https://etherscan.io/block/125)"
         in message
     )
-
-
-@pytest.mark.asyncio
-async def test_initialized_event_only_emits_for_v3_module():
-    from sentinel.modules.community.events import CommunityEventMessages
-    from sentinel.models import Event
-
-    class DummyAdapter:
-        csm_version = 3
-
-        def catalog_events(self):
-            return {"Initialized"}
-
-        def notifiable_events(self):
-            return {"Initialized"}
-
-    set_config(SimpleNamespace(module_ui_url="https://csm.lido.fi"))
-
-    event_messages = CommunityEventMessages.__new__(CommunityEventMessages)
-    event_messages.chain = _DummyConnectProvider()
-    event_messages.cfg = SimpleNamespace(etherscan_tx_url_template="https://etherscan.io/tx/{}")
-    event_messages.module_adapter = DummyAdapter()
-    event_messages.module_address = "0x0000000000000000000000000000000000000abc"
-
-    ignored_v2_event = Event(
-        event="Initialized",
-        args={"version": 2},
-        block=1,
-        tx=HexBytes("0xdeadbeef"),
-        address="0x0000000000000000000000000000000000000abc",
-        log_index=0,
-        transaction_index=0,
-    )
-    emitted_v3_event = Event(
-        event="Initialized",
-        args={"version": 3},
-        block=1,
-        tx=HexBytes("0xdeadbeef"),
-        address="0x0000000000000000000000000000000000000abc",
-        log_index=0,
-        transaction_index=0,
-    )
-    ignored_non_module_event = Event(
-        event="Initialized",
-        args={"version": 3},
-        block=1,
-        tx=HexBytes("0xdeadbeef"),
-        address="0x0000000000000000000000000000000000000def",
-        log_index=0,
-        transaction_index=0,
-    )
-
-    assert (
-        await CommunityEventMessages.get_notification_plan(
-            event_messages, _notification(ignored_v2_event)
-        )
-        is None
-    )
-    assert (
-        await CommunityEventMessages.get_notification_plan(
-            event_messages, _notification(ignored_non_module_event)
-        )
-        is None
-    )
-
-    plan = await CommunityEventMessages.get_notification_plan(
-        event_messages, _notification(emitted_v3_event)
-    )
-
-    assert plan is not None
-    assert "CSM v3 is live" in plan.broadcast
