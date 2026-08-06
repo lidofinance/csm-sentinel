@@ -84,6 +84,8 @@ class JobContext:
             bundle.version,
             version,
         )
+        if context.job is not None:
+            context.job.schedule_removal()
         supervisor = context.runtime.module_supervisor
         supervisor.request_shutdown()
         await supervisor.raw_subscription.stop()
