@@ -1,22 +1,15 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from sentinel.models import Event, EventNotification
 from sentinel.modules.formatting import read_field
 
-DEPOSITED_SIGNING_KEYS_COUNT_CHANGED = "DepositedSigningKeysCountChanged"
-TOTAL_SIGNING_KEYS_COUNT_CHANGED = "TotalSigningKeysCountChanged"
-VALIDATOR_EXIT_REQUEST = "ValidatorExitRequest"
 OPERATOR_GROUP_CREATED = "OperatorGroupCreated"
 OPERATOR_GROUP_UPDATED = "OperatorGroupUpdated"
 OPERATOR_GROUP_CLEARED = "OperatorGroupCleared"
 NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGED = "NodeOperatorEffectiveWeightChanged"
 BOND_CURVE_WEIGHT_SET = "BondCurveWeightSet"
-
-# Ethereum and Hoodi use nominal 12-second consensus slots.
-BLOCKS_PER_DAY = 24 * 60 * 60 // 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,10 +23,6 @@ class AggregationGroup:
 
 
 class AggregationGroups:
-    DEPOSITED_SIGNING_KEY_COUNTS = AggregationGroup(
-        name="deposited_signing_key_counts",
-        window_blocks=BLOCKS_PER_DAY,
-    )
     TOTAL_SIGNING_KEY_COUNTS = AggregationGroup(
         name="total_signing_key_counts",
         window_blocks=1,
@@ -110,13 +99,9 @@ class NodeOperatorEventAggregator(EventAggregator):
             group=self.group.name,
             aggregation_key=self.aggregation_key(event),
             start_block=event.block,
-            end_block=event.block + self.window_blocks - 1,
+            end_block=event.block + self.group.window_blocks - 1,
             event_names=self.event_names,
         )
-
-    @property
-    def window_blocks(self) -> int:
-        return self.group.window_blocks
 
     def aggregate(self, events: Iterable[Event]) -> list[EventNotification]:
         aggregatable_events = sorted(
@@ -129,11 +114,10 @@ class NodeOperatorEventAggregator(EventAggregator):
             node_operator_id = int(event.args["nodeOperatorId"])
             events_by_key.setdefault((event.event, node_operator_id), []).append(event)
 
-        notifications: list[EventNotification] = []
-        for _, operator_events in sorted(events_by_key.items()):
-            notifications.append(EventNotification(source_events=tuple(operator_events)))
-
-        return notifications
+        return [
+            EventNotification(source_events=tuple(operator_events))
+            for _, operator_events in sorted(events_by_key.items())
+        ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,10 +144,6 @@ class OperatorGroupChangeAggregator(EventAggregator):
             end_block=event.block + self.group.window_blocks - 1,
             event_names=self.event_names,
         )
-
-    @property
-    def window_blocks(self) -> int:
-        return self.group.window_blocks
 
     def aggregate(self, events: Iterable[Event]) -> list[EventNotification]:
         relevant_events = sorted(

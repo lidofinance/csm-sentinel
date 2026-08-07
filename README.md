@@ -149,6 +149,9 @@ The default value is `10000`.
 `PROCESS_BLOCKS_REQUESTS_PER_SECOND` caps how many historical RPC requests `process_blocks_from`
 issues per second when backfilling. Leave unset to disable throttling.
 
+`DEPOSIT_DIGEST_TIME` sets the daily UTC delivery time for deposited signing key digests.
+Use `HH:MM` format; the default is `09:00`.
+
 ## Admin access (ADMIN_IDS)
 
 Some maintenance commands are restricted to admins. To enable them, set your Telegram user ID in the `ADMIN_IDS` environment variable.

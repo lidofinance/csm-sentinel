@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
-from typing import TYPE_CHECKING, Any, ClassVar, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from eth_typing import ChecksumAddress
 
@@ -13,6 +13,7 @@ from sentinel.modules.texts import BotTexts
 if TYPE_CHECKING:
     from sentinel.models import Event
     from sentinel.modules.aggregation import EventAggregator
+    from sentinel.modules.event_engine import EventMessageEngineBase
 
 EventPredicate = Callable[["Event"], bool]
 logger = logging.getLogger(__name__)
@@ -30,44 +31,6 @@ class EventSource:
 class NodeOperatorOption:
     id: int
     label: str
-
-
-class ModuleAdapter(Protocol):
-    module_type: ModuleType
-    addresses: ContractAddresses
-    contracts: Any
-    contract_abis: ContractABIs
-    chain: SharedChainConnection
-    texts: BotTexts
-    module_ui_url: str | None
-
-    def catalog_events(self) -> set[str]: ...
-
-    def notifiable_events(self) -> set[str]: ...
-
-    def side_effect_events(self) -> set[str]: ...
-
-    def build_event_list_text(self) -> str: ...
-
-    async def is_valid_operator_id(self, operator_id: int) -> bool: ...
-
-    async def node_operator_label(self, operator_id: int) -> str: ...
-
-    async def node_operator_options(self) -> tuple[NodeOperatorOption, ...]: ...
-
-    def remember_node_operator_added(self, operator_id: int) -> None: ...
-
-    async def warm_up(self) -> None: ...
-
-    async def refresh_staking_module_id(self) -> None: ...
-
-    def event_sources(self) -> tuple[EventSource, ...]: ...
-
-    def topic_abis(self) -> tuple[list[dict], ...]: ...
-
-    def build_event_messages(self): ...
-
-    def event_aggregators(self) -> tuple["EventAggregator", ...]: ...
 
 
 class BaseModuleAdapter:
@@ -113,6 +76,9 @@ class BaseModuleAdapter:
 
     def event_aggregators(self) -> tuple["EventAggregator", ...]:
         return ()
+
+    def build_event_messages(self) -> "EventMessageEngineBase":
+        raise NotImplementedError
 
     async def is_valid_operator_id(self, operator_id: int) -> bool:
         return 0 <= operator_id < await self.node_operators_count()

@@ -3,23 +3,21 @@ import logging
 from contextlib import suppress
 from dataclasses import dataclass
 import signal
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from web3 import AsyncWeb3
 
 from sentinel.app.health import HealthState
 from sentinel.chain import SharedChainConnection
 from sentinel.config import Config
-from sentinel.models import Block, Event
+from sentinel.models import Block, Event, EventNotification
 from sentinel.metrics.registry import DEFAULT_METRICS
 from sentinel.modules.side_effects import ModuleEventSideEffects
 from sentinel.rpc import Subscription
 from sentinel.rpc_provider import RpcAvailabilityError
-from sentinel.services.aggregation import (
-    AggregationCoordinator,
-    NotificationSink,
-    ProcessingStateProvider,
-)
+from sentinel.services.aggregation import AggregationCoordinator
+from sentinel.services.digest import Digest, build_digests
 
 logger = logging.getLogger(__name__)
 logging.getLogger("web3.providers.WebSocketProvider").setLevel(logging.WARNING)
@@ -28,22 +26,28 @@ RPC_RECOVERY_RETRY_SECONDS = 1.0
 if TYPE_CHECKING:
     from asyncio import AbstractEventLoop
 
-    from sentinel.modules.base import ModuleAdapter
-    from sentinel.notifications import EventMessageEngine
+    from sentinel.app.storage import BotStorage
+    from sentinel.modules.base import BaseModuleAdapter
+    from sentinel.modules.event_engine import EventMessageEngineBase
 
 
 @dataclass(frozen=True, slots=True)
 class ModuleRuntime:
-    module_adapter: "ModuleAdapter"
+    module_adapter: "BaseModuleAdapter"
     raw_subscription: Subscription
-    storage: ProcessingStateProvider
-    event_messages: "EventMessageEngine"
+    storage: Callable[[], "BotStorage"]
+    event_messages: "EventMessageEngineBase"
     event_side_effects: ModuleEventSideEffects
     aggregation: AggregationCoordinator
+    digests: dict[str, Digest]
 
     async def handle_event(self, event: Event) -> None:
         await self.event_side_effects.process_event(event)
-        await self.aggregation.handle_event(event)
+        for digest in self.digests.values():
+            if await digest.handle_event(event):
+                break
+        else:
+            await self.aggregation.handle_event(event)
         logger.info(
             "Event processed",
             extra={
@@ -61,11 +65,8 @@ class ModuleRuntime:
     async def resume_pending_aggregations(self) -> None:
         await self.aggregation.resume_pending()
 
-    async def close(self) -> None:
-        await self.aggregation.close()
-
     def _advance_block(self, block_number: int) -> None:
-        state = self.storage.state
+        state = self.storage()
         state.block.update(max(state.block.value, block_number))
 
 
@@ -73,9 +74,9 @@ def build_module_runtime(
     w3,
     *,
     health: HealthState,
-    module_adapter: "ModuleAdapter",
-    storage: ProcessingStateProvider,
-    notification_sink: NotificationSink,
+    module_adapter: "BaseModuleAdapter",
+    storage: Callable[[], "BotStorage"],
+    emit_notification: Callable[[EventNotification], Awaitable[None]],
     backfill_w3=None,
     catchup_until_block: int | None = None,
 ) -> ModuleRuntime:
@@ -91,8 +92,13 @@ def build_module_runtime(
     event_side_effects = ModuleEventSideEffects(module_adapter)
     aggregation = AggregationCoordinator(
         storage=storage,
-        notification_sink=notification_sink,
+        emit_notification=emit_notification,
         aggregators=module_adapter.event_aggregators(),
+    )
+    digests = build_digests(
+        event_messages.event_handlers,
+        lambda: storage().digests,
+        emit_notification,
     )
     module_runtime = ModuleRuntime(
         module_adapter=module_adapter,
@@ -101,6 +107,7 @@ def build_module_runtime(
         event_messages=event_messages,
         event_side_effects=event_side_effects,
         aggregation=aggregation,
+        digests=digests,
     )
     raw_subscription.add_event_consumer(module_runtime)
     raw_subscription.add_block_consumer(module_runtime)
@@ -117,9 +124,9 @@ class ModuleRuntimeSupervisor:
         config: Config,
         chain: SharedChainConnection,
         health: HealthState,
-        module_adapter: "ModuleAdapter",
-        storage: ProcessingStateProvider,
-        notification_sink: NotificationSink,
+        module_adapter: "BaseModuleAdapter",
+        storage: Callable[[], "BotStorage"],
+        emit_notification: Callable[[EventNotification], Awaitable[None]],
         backfill_w3=None,
     ) -> None:
         self._subscription_w3_factory = subscription_w3_factory
@@ -128,7 +135,7 @@ class ModuleRuntimeSupervisor:
         self._chain = chain
         self._health = health
         self._storage = storage
-        self._notification_sink = notification_sink
+        self._emit_notification = emit_notification
         self._shutdown_requested = False
         self._module_runtime_restarted = asyncio.Event()
         self._catchup_until_block: int | None = None
@@ -137,14 +144,14 @@ class ModuleRuntimeSupervisor:
 
         self._install_module_runtime(self._new_module_runtime(module_adapter))
 
-    def _new_module_runtime(self, module_adapter: "ModuleAdapter") -> ModuleRuntime:
+    def _new_module_runtime(self, module_adapter: "BaseModuleAdapter") -> ModuleRuntime:
         return build_module_runtime(
             self._subscription_w3_factory(),
             health=self._health,
             backfill_w3=self._backfill_w3,
             module_adapter=module_adapter,
             storage=self._storage,
-            notification_sink=self._notification_sink,
+            emit_notification=self._emit_notification,
             catchup_until_block=self._catchup_until_block,
         )
 
@@ -156,15 +163,22 @@ class ModuleRuntimeSupervisor:
         return self.module_runtime.raw_subscription
 
     @property
-    def event_messages(self) -> "EventMessageEngine":
+    def event_messages(self) -> "EventMessageEngineBase":
         return self.module_runtime.event_messages
 
     @property
     def cfg(self):
         return self._config
 
+    async def flush_digest(self, name: str, through_block: int) -> int:
+        return await self.module_runtime.digests[name].flush_through(through_block)
+
+    @property
+    def digest_names(self) -> frozenset[str]:
+        return frozenset(self.module_runtime.digests)
+
     def ensure_state_containers(self) -> None:
-        self._storage.state
+        self._storage()
 
     def setup_signal_handlers(self, loop: "AbstractEventLoop") -> None:
         self._signal_loop = loop
@@ -253,7 +267,7 @@ class ModuleRuntimeSupervisor:
         self, exc: BaseException, *, reason: str = "rpc_disconnect"
     ) -> None:
         previous_runtime = self.module_runtime
-        replay_start_block = max(self._storage.state.block.value + 1, 1)
+        replay_start_block = max(self._storage().block.value + 1, 1)
         logger.warning(
             "RPC connection lost; rebuilding subscription runtime and replaying from block %s: %s",
             replay_start_block,
@@ -262,7 +276,6 @@ class ModuleRuntimeSupervisor:
         self._health.mark_catchup_started()
         previous_runtime.raw_subscription.request_shutdown()
         await previous_runtime.raw_subscription.abort()
-        await previous_runtime.close()
         self._pending_replay_start_block = replay_start_block
         self._install_module_runtime(self._new_module_runtime(previous_runtime.module_adapter))
         DEFAULT_METRICS.chain.subscription_recovered(reason)
@@ -293,7 +306,7 @@ class ModuleRuntimeSupervisor:
 
     async def checkpoint_current_head(self) -> int:
         head = await self.get_block_number()
-        checkpoint = self._storage.state.block
+        checkpoint = self._storage().block
         checkpoint.update(max(checkpoint.value, head))
         return head
 
@@ -315,7 +328,7 @@ class ModuleRuntimeSupervisor:
                         return
                     replay_start_block = max(
                         replay_start_block,
-                        self._storage.state.block.value + 1,
+                        self._storage().block.value + 1,
                     )
                     logger.warning(
                         "Catch-up RPC failed; retrying from block %s: %s",
@@ -336,7 +349,6 @@ class ModuleRuntimeSupervisor:
 
     async def close(self) -> None:
         self.request_shutdown()
-        await self.module_runtime.close()
         await self.raw_subscription.stop()
         if self._backfill_w3 is not None and hasattr(self._backfill_w3.provider, "disconnect"):
             with suppress(Exception):

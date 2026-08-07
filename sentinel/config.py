@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from datetime import time, timezone
 
 from sentinel.app.contracts import ContractAddresses
 
@@ -36,6 +37,7 @@ class ConfigValues:
     process_blocks_requests_per_second: float | None
     block_from: int | None
     admin_ids: set[int]
+    deposit_digest_time: time
 
     # Derived URL templates
     @property
@@ -70,6 +72,7 @@ class EnvConfig(ConfigValues):
             process_blocks_requests_per_second=self.process_blocks_requests_per_second,
             block_from=self.block_from,
             admin_ids=self.admin_ids,
+            deposit_digest_time=self.deposit_digest_time,
         )
 
 
@@ -88,6 +91,17 @@ def _parse_healthcheck_port(raw: str | None) -> int:
     if port <= 0 or port > 65535:
         raise RuntimeError("HEALTHCHECK_PORT must be between 1 and 65535")
     return port
+
+
+def _parse_deposit_digest_time(raw: str | None) -> time:
+    value = raw or "09:00"
+    try:
+        parsed = time.fromisoformat(value)
+    except ValueError as exc:
+        raise RuntimeError("DEPOSIT_DIGEST_TIME must use HH:MM format") from exc
+    if parsed.tzinfo is not None or parsed.second or parsed.microsecond:
+        raise RuntimeError("DEPOSIT_DIGEST_TIME must use HH:MM format")
+    return parsed.replace(tzinfo=timezone.utc)
 
 
 def get_healthcheck_bind_from_env() -> tuple[str, int]:
@@ -150,6 +164,7 @@ def load_config_from_env() -> EnvConfig:
         process_blocks_requests_per_second=process_blocks_requests_per_second,
         block_from=block_from,
         admin_ids=_parse_admin_ids(os.getenv("ADMIN_IDS", "")),
+        deposit_digest_time=_parse_deposit_digest_time(os.getenv("DEPOSIT_DIGEST_TIME")),
     )
 
 

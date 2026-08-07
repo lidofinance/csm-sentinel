@@ -1,32 +1,74 @@
-from collections.abc import Iterable
-from dataclasses import dataclass, field
-from typing import Protocol
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import TypeVar
 
-from sentinel.models import EventNotification
+OperatorId = TypeVar("OperatorId", int, str)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
+class BroadcastDelivery:
+    message: str
+    operator_ids: frozenset[str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorMessagesDelivery:
+    messages: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class PerChatDelivery:
+    operator_ids: frozenset[str]
+    render: Callable[[frozenset[str]], tuple[str, ...]]
+
+
+NotificationDelivery = BroadcastDelivery | OperatorMessagesDelivery | PerChatDelivery
+
+
+@dataclass(frozen=True, slots=True)
 class NotificationPlan:
-    """Container describing how subscribers should be notified for an event."""
+    """One explicit delivery strategy for an event notification."""
 
-    # Optional general broadcast message
-    broadcast: str | None = None
-    # If set, restrict broadcast to these node operator IDs (as strings)
-    broadcast_node_operator_ids: set[str] | None = None
-    # Specific messages for individual node operators (keyed by node operator ID as string)
-    per_node_operator: dict[str, str] = field(default_factory=dict)
+    delivery: NotificationDelivery
 
-    def add_node_operator_message(self, node_operator_id: int | str, message: str) -> None:
-        """Register a node-operator specific message, storing the ID as a string."""
+    @classmethod
+    def broadcast(cls, message: str) -> "NotificationPlan":
+        return cls(BroadcastDelivery(message=message))
 
-        self.per_node_operator[str(node_operator_id)] = message
+    @classmethod
+    def broadcast_to_operators(
+        cls,
+        message: str,
+        operator_ids: Iterable[int | str],
+    ) -> "NotificationPlan":
+        return cls(
+            BroadcastDelivery(
+                message=message,
+                operator_ids=_normalise_operator_ids(operator_ids),
+            )
+        )
 
-    def with_broadcast_targets(self, node_operator_ids: Iterable[int | str]) -> "NotificationPlan":
-        """Limit broadcast delivery to the provided node operator identifiers."""
+    @classmethod
+    def per_operator(
+        cls,
+        messages: Mapping[OperatorId, str],
+    ) -> "NotificationPlan":
+        normalised_messages = {str(no_id): message for no_id, message in messages.items()}
+        if not normalised_messages:
+            raise ValueError("per-operator delivery requires at least one message")
+        return cls(OperatorMessagesDelivery(messages=normalised_messages))
 
-        self.broadcast_node_operator_ids = {str(no_id) for no_id in node_operator_ids}
-        return self
+    @classmethod
+    def per_chat(
+        cls,
+        node_operator_ids: Iterable[int | str],
+        render: Callable[[frozenset[str]], tuple[str, ...]],
+    ) -> "NotificationPlan":
+        operator_ids = _normalise_operator_ids(node_operator_ids)
+        if not operator_ids:
+            raise ValueError("per-chat delivery requires at least one operator")
+        return cls(PerChatDelivery(operator_ids=operator_ids, render=render))
 
 
-class EventMessageEngine(Protocol):
-    async def get_notification_plan(self, event: EventNotification) -> NotificationPlan | None: ...
+def _normalise_operator_ids(values: Iterable[int | str]) -> frozenset[str]:
+    return frozenset(str(value) for value in values)

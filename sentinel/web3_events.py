@@ -8,7 +8,7 @@ from web3.types import EventData
 from web3.types import FilterParams
 
 from sentinel.models import Event
-from sentinel.modules.base import EventSource, ModuleAdapter
+from sentinel.modules.base import BaseModuleAdapter, EventSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,7 +17,7 @@ class EventBindingSet:
     abi_by_topics: dict
 
 
-def build_event_bindings(module_adapter: ModuleAdapter) -> EventBindingSet:
+def build_event_bindings(module_adapter: BaseModuleAdapter) -> EventBindingSet:
     event_names = module_adapter.notifiable_events() | module_adapter.side_effect_events()
     return EventBindingSet(
         event_sources=module_adapter.event_sources(),

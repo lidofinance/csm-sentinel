@@ -2,7 +2,12 @@ import os
 import pytest
 
 from sentinel.config import clear_config
-from sentinel.modules.aggregation import BLOCKS_PER_DAY
+from sentinel.notifications import (
+    BroadcastDelivery,
+    NotificationPlan,
+    OperatorMessagesDelivery,
+    PerChatDelivery,
+)
 
 from .helpers import build_subscription
 
@@ -32,11 +37,27 @@ def curated_hoodi_config_env():
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 
+def _render_plan(plan: NotificationPlan | None) -> str | None:
+    if plan is None:
+        return None
+    delivery = plan.delivery
+    if isinstance(delivery, BroadcastDelivery):
+        return delivery.message
+    if isinstance(delivery, PerChatDelivery):
+        return "\n".join(delivery.render(delivery.operator_ids))
+    return None
+
+
+def _operator_messages(plan: NotificationPlan) -> dict[str, str]:
+    assert isinstance(plan.delivery, OperatorMessagesDelivery)
+    return dict(plan.delivery.messages)
+
+
 def _has_expected_message(harness, *, event_name: str, expected_markdown: str | None) -> bool:
     messages = []
     for event, plan in harness.processed_events:
         if event is not None and event.event == event_name:
-            messages.append(plan.broadcast if plan else None)
+            messages.append(_render_plan(plan))
     if not messages:
         return False
     if expected_markdown is None:
@@ -51,7 +72,7 @@ def _has_expected_node_operator_messages(
     for event, plan in harness.processed_events:
         if event is None or event.event != event_name or plan is None:
             continue
-        for node_operator_id, message in plan.per_node_operator.items():
+        for node_operator_id, message in _operator_messages(plan).items():
             messages_by_operator.setdefault(node_operator_id, set()).add(message)
 
     return all(
@@ -70,19 +91,21 @@ async def _exercise_curated_event(
     expected_markdown: str | None,
     anvil_launcher,
     expected_per_node: dict[str, str] | None = None,
-    aggregation_window_blocks: int | None = None,
+    deposit_digest: bool = False,
 ) -> None:
-    replay_end_block = fork_block + (aggregation_window_blocks or 1) - 1
+    replay_end_block = fork_block
     anvil = await anvil_launcher(replay_end_block)
     harness = await build_subscription(anvil.ws_url, anvil.http_url)
     try:
         await harness.replay_blocks(fork_block - 1, replay_end_block)
+        if deposit_digest:
+            await harness.flush_digest(replay_end_block)
         assert _has_expected_message(
             harness, event_name=event_name, expected_markdown=expected_markdown
         ), (
             f"Did not find expected Curated message for event {event_name}, \n"
             f"{expected_markdown=}\n"
-            f"found={[plan.broadcast if plan else None for event, plan in harness.processed_events]}"
+            f"found={[_render_plan(plan) for event, plan in harness.processed_events]}"
         )
         if expected_per_node is not None:
             assert _has_expected_node_operator_messages(
@@ -90,7 +113,7 @@ async def _exercise_curated_event(
             ), (
                 f"Did not find expected Curated per-node message for event {event_name}, \n"
                 f"{expected_per_node=}\n"
-                f"found={[(event.event if event else None, plan.per_node_operator if plan else None) for event, plan in harness.processed_events]}"
+                f"found={[(event.event if event else None, _operator_messages(plan) if plan else None) for event, plan in harness.processed_events]}"
             )
     finally:
         await harness.disconnect()
@@ -131,14 +154,9 @@ async def test_curated_process_blocks_deposited_signing_keys_count_changed(
     await _exercise_curated_event(
         event_name="DepositedSigningKeysCountChanged",
         fork_block=2766515,
-        expected_markdown=(
-            "🤩 *Keys were deposited\\!*\n\n"
-            "Deposited keys count: `0 \\-\\> 16`\n\n"
-            "Node Operator: \\#2 \\- Develp PTO\n"
-            "[Transaction](https://etherscan.io/tx/0xdeadbeef)"
-        ),
+        expected_markdown="🤩 *Deposit digest*",
         anvil_launcher=anvil_launcher,
-        aggregation_window_blocks=BLOCKS_PER_DAY,
+        deposit_digest=True,
     )
 
 
@@ -421,7 +439,7 @@ async def test_curated_batches_validator_withdrawals_across_five_blocks(anvil_la
             3232457,
         ]
 
-        messages = {plan.broadcast for _, plan in processed if plan is not None}
+        messages = {_render_plan(plan) for _, plan in processed if plan is not None}
         assert len(messages) == 1
         message = messages.pop()
         assert "Validator withdrawals confirmed" in message

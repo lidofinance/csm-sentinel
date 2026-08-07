@@ -106,10 +106,20 @@ class EventHandler:
     event: str
     handler: "EventHandlerFn"
     aggregation_group: "AggregationGroup | None" = None
+    digest_name: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.aggregation_group is not None and self.digest_name is not None:
+            raise ValueError(
+                f"Event {self.event!r} cannot use both aggregation and digest buffering"
+            )
 
 
 if TYPE_CHECKING:
     from sentinel.modules.aggregation import AggregationGroup
     from sentinel.notifications import NotificationPlan
 
-EventHandlerFn = Callable[[Any, EventNotification], Awaitable["NotificationPlan | str | None"]]
+EventHandlerFn = Callable[
+    [Any, EventNotification],
+    Awaitable["NotificationPlan | str | None"],
+]
