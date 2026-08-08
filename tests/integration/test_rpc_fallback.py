@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import time, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
@@ -69,7 +70,7 @@ class _BlockOnlyAdapter:
         return ()
 
     def build_event_messages(self):
-        return SimpleNamespace(get_notification_plan=None)
+        return SimpleNamespace(get_notification_plan=None, event_handlers={})
 
 
 class _Storage:
@@ -79,6 +80,9 @@ class _Storage:
     @property
     def state(self):
         return BotStorage(self.bot_data)
+
+    def __call__(self):
+        return self.state
 
 
 class _Sink:
@@ -156,6 +160,7 @@ def _config(provider_urls: tuple[str, ...]) -> Config:
         process_blocks_requests_per_second=None,
         block_from=None,
         admin_ids=set(),
+        deposit_digest_time=time(9, 0, tzinfo=timezone.utc),
     )
 
 
@@ -681,7 +686,7 @@ async def test_supervisor_replays_blocks_mined_during_primary_outage(
         health=health,
         module_adapter=_BlockOnlyAdapter(cfg.contract_addresses),
         storage=storage,
-        notification_sink=_Sink(),
+        emit_notification=_Sink().emit,
         backfill_w3=backfill_w3,
     )
     original_runtime = supervisor.module_runtime

@@ -5,11 +5,15 @@ import os
 import pytest
 
 from sentinel.config import get_config, clear_config
-from sentinel.modules.aggregation import BLOCKS_PER_DAY
+from sentinel.notifications import (
+    BroadcastDelivery,
+    NotificationPlan,
+    PerChatDelivery,
+)
+from sentinel.services.digest import DigestGroups
 
 from .helpers import (
     build_subscription,
-    mine_anvil_blocks,
     replay_transaction_on_anvil,
 )
 
@@ -39,6 +43,17 @@ def community_hoodi_config_env():
 pytestmark = [pytest.mark.asyncio, pytest.mark.integration]
 
 
+def _render_plan(plan: NotificationPlan | None) -> str | None:
+    if plan is None:
+        return None
+    delivery = plan.delivery
+    if isinstance(delivery, BroadcastDelivery):
+        return delivery.message
+    if isinstance(delivery, PerChatDelivery):
+        return "\n".join(delivery.render(delivery.operator_ids))
+    return None
+
+
 async def _exercise_event(
     *,
     event_name: str,
@@ -47,10 +62,10 @@ async def _exercise_event(
     expected_markdown: str | None,
     anvil_launcher,
     via_subscription: bool = False,
-    aggregation_window_blocks: int | None = None,
+    deposit_digest: bool = False,
 ) -> None:
     event_block = fork_block
-    replay_end_block = event_block + (aggregation_window_blocks or 1) - 1
+    replay_end_block = event_block
     launch_block = event_block - 1 if via_subscription else replay_end_block
 
     anvil = await anvil_launcher(launch_block)
@@ -67,30 +82,38 @@ async def _exercise_event(
                     anvil_http_url=anvil.http_url,
                     tx_hash=tx_hash,
                 )
-                if aggregation_window_blocks is not None:
-                    # Live heads complete the preceding block so all logs from the
-                    # window end are accumulated before its notification is emitted.
-                    await mine_anvil_blocks(anvil.http_url, aggregation_window_blocks)
+                if deposit_digest:
+                    assert await _wait_for(
+                        lambda: (
+                            harness.runtime.digests[
+                                DigestGroups.DEPOSITED_SIGNING_KEYS
+                            ].pending_count
+                            > 0
+                        )
+                    )
+                    await harness.flush_digest(event_block)
                 assert await _wait_for(
                     lambda: _has_expected_message(
                         harness, event_name=event_name, expected_markdown=expected_markdown
                     ),
-                    timeout=30.0 if aggregation_window_blocks is not None else 5.0,
+                    timeout=5.0,
                 ), (
                     f"Did not find expected message for event {event_name}, \n"
                     f"{expected_markdown=}\n"
-                    f"found={[plan.broadcast if plan else None for event, plan in harness.processed_events]}"
+                    f"found={[_render_plan(plan) for event, plan in harness.processed_events]}"
                 )
             finally:
                 await harness.stop()
         else:
             await harness.replay_blocks(event_block - 1, replay_end_block)
+            if deposit_digest:
+                await harness.flush_digest(event_block)
             assert _has_expected_message(
                 harness, event_name=event_name, expected_markdown=expected_markdown
             ), (
                 f"Did not find expected message for event {event_name}, \n"
                 f"{expected_markdown=}\n"
-                f"found={[plan.broadcast if plan else None for event, plan in harness.processed_events]}"
+                f"found={[_render_plan(plan) for event, plan in harness.processed_events]}"
             )
 
     finally:
@@ -116,7 +139,7 @@ def _has_expected_message(harness, *, event_name: str, expected_markdown: str | 
     messages = []
     for event, plan in harness.processed_events:
         if event is not None and event.event == event_name:
-            messages.append(plan.broadcast if plan else None)
+            messages.append(_render_plan(plan))
     if not messages:
         return False
     if expected_markdown is None:
@@ -136,10 +159,10 @@ async def test_process_blocks_deposited_signing_keys_count_changed(
         event_name="DepositedSigningKeysCountChanged",
         fork_block=1279457,
         tx_hash="0xb6be980ac363c47424f972576ae13f46cd41f86fac3157586553a77a063f1926",
-        expected_markdown="🤩 *Keys were deposited\\!*\n\nDeposited keys count: `0 \\-\\> 1`\n\nnodeOperatorId: 299\n[Transaction](https://etherscan.io/tx/0xdeadbeef)",
+        expected_markdown="🤩 *Deposit digest*",
         anvil_launcher=anvil_launcher,
         via_subscription=via_subscription,
-        aggregation_window_blocks=BLOCKS_PER_DAY,
+        deposit_digest=True,
     )
 
 

@@ -4,6 +4,7 @@ import json
 import logging
 from collections.abc import Iterable, MutableMapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Set
 
@@ -265,6 +266,24 @@ class AggregationWindowStore:
                 return record.window
         return None
 
+    @classmethod
+    def pop_group_events(
+        cls,
+        bot_data: MutableMapping[str, Any],
+        group: str,
+    ) -> list[Event]:
+        raw_windows = bot_data.get(cls.KEY)
+        if not isinstance(raw_windows, dict):
+            return []
+
+        events: list[Event] = []
+        for key, record in list(raw_windows.items()):
+            if not isinstance(record, dict) or record.get("group") != group:
+                continue
+            raw_windows.pop(key)
+            events.extend(DigestStore.parse_events(record.get("events")))
+        return events
+
     @property
     def _records(self) -> dict[str, dict[str, Any]]:
         return self._bot_data[self.KEY]
@@ -285,11 +304,9 @@ class AggregationWindowStore:
     def _normalise_windows(cls, value: Any) -> dict[str, dict[str, Any]]:
         if not value:
             return {}
-
         if not isinstance(value, dict):
             logger.warning("Ignoring malformed aggregation window state: %r", value)
             return {}
-
         return {record.key: record.to_dict() for record in cls._records_from(value)}
 
 
@@ -345,6 +362,121 @@ class AggregationWindowRecord:
         )
 
 
+class DigestStore:
+    """Persist events until a digest is sent."""
+
+    KEY = "digests"
+
+    def __init__(self, bot_data: MutableMapping[str, Any]):
+        self._bot_data = bot_data
+        self._bot_data[self.KEY] = self._normalise(bot_data.get(self.KEY))
+
+    def events(self, name: str) -> tuple[Event, ...]:
+        return tuple(Event.from_dict(record) for record in self._records.get(name, []))
+
+    def append(self, name: str, event: Event) -> None:
+        self.replace(name, (*self.events(name), event))
+
+    def extend(self, name: str, events: Iterable[Event]) -> None:
+        self.replace(name, (*self.events(name), *events))
+
+    def discard(self, name: str, events: tuple[Event, ...]) -> None:
+        discarded = {event.log_identity for event in events}
+        self.replace(
+            name,
+            (event for event in self.events(name) if event.log_identity not in discarded),
+        )
+
+    def replace(self, name: str, events: Iterable[Event]) -> None:
+        events_by_identity = {event.log_identity: event for event in events}
+        ordered = sorted(
+            events_by_identity.values(),
+            key=lambda event: (event.block, event.transaction_index, event.log_index),
+        )
+        self._records[name] = [event.to_dict() for event in ordered]
+
+    @property
+    def _records(self) -> dict[str, list[dict[str, Any]]]:
+        return self._bot_data[self.KEY]
+
+    @classmethod
+    def _normalise(cls, value: Any) -> dict[str, list[dict[str, Any]]]:
+        if not value:
+            return {}
+        if not isinstance(value, dict):
+            logger.warning("Ignoring malformed digest state: %r", value)
+            return {}
+        return {
+            str(name): [event.to_dict() for event in cls.parse_events(records)]
+            for name, records in value.items()
+        }
+
+    @classmethod
+    def parse_events(cls, value: Any) -> list[Event]:
+        if not value:
+            return []
+        if not isinstance(value, list):
+            logger.warning("Ignoring malformed digest event state: %r", value)
+            return []
+        events: list[Event] = []
+        for record in value:
+            try:
+                events.append(Event.from_dict(record))
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Skipping malformed digest event: %r", record)
+        return events
+
+
+class ScheduledJobStore:
+    """Persistence-backed completion markers for calendar-scheduled jobs."""
+
+    KEY = "scheduled_jobs"
+
+    def __init__(self, bot_data: MutableMapping[str, Any]):
+        self._bot_data = bot_data
+        self._bot_data[self.KEY] = self._normalise(bot_data.get(self.KEY))
+
+    def completed_for(self, job_name: str) -> datetime | None:
+        record = self._records.get(job_name)
+        if record is None:
+            return None
+        return datetime.fromisoformat(record["completed_for"]).astimezone(UTC)
+
+    def mark_completed(self, job_name: str, scheduled_for: datetime) -> None:
+        if scheduled_for.tzinfo is None:
+            raise ValueError("scheduled job completion time must be timezone-aware")
+        self._records[job_name] = {
+            "completed_for": scheduled_for.astimezone(UTC).isoformat(),
+        }
+
+    @property
+    def _records(self) -> dict[str, dict[str, str]]:
+        return self._bot_data[self.KEY]
+
+    @classmethod
+    def _normalise(cls, value: Any) -> dict[str, dict[str, str]]:
+        if not value:
+            return {}
+        if not isinstance(value, dict):
+            logger.warning("Ignoring malformed scheduled job state: %r", value)
+            return {}
+
+        records: dict[str, dict[str, str]] = {}
+        for job_name, raw_record in value.items():
+            try:
+                raw_completed_for = raw_record["completed_for"]
+                completed_for = datetime.fromisoformat(raw_completed_for)
+                if completed_for.tzinfo is None:
+                    raise ValueError("completed_for must be timezone-aware")
+            except (KeyError, TypeError, ValueError):
+                logger.warning("Skipping malformed scheduled job record: %r", raw_record)
+                continue
+            records[str(job_name)] = {
+                "completed_for": completed_for.astimezone(UTC).isoformat(),
+            }
+        return records
+
+
 class BotStorage:
     """Utility wrapper around the application-wide bot data."""
 
@@ -355,7 +487,9 @@ class BotStorage:
         self._groups = ChatIdSet(bot_data, "group_ids")
         self._channels = ChatIdSet(bot_data, "channel_ids")
         self._node_operator_chats = NodeOperatorChats(bot_data)
+        self._digests = DigestStore(bot_data)
         self._aggregation_windows = AggregationWindowStore(bot_data)
+        self._scheduled_jobs = ScheduledJobStore(bot_data)
 
     @property
     def block(self) -> BlockState:
@@ -378,8 +512,16 @@ class BotStorage:
         return self._node_operator_chats
 
     @property
+    def digests(self) -> DigestStore:
+        return self._digests
+
+    @property
     def aggregation_windows(self) -> AggregationWindowStore:
         return self._aggregation_windows
+
+    @property
+    def scheduled_jobs(self) -> ScheduledJobStore:
+        return self._scheduled_jobs
 
     def actual_chat_ids(self) -> Set[int]:
         return self.users.all().union(self.groups.all(), self.channels.all())

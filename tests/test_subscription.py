@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, time
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import AsyncMock, Mock
@@ -11,13 +12,13 @@ from sentinel.app.contracts import CommunityContractAddresses
 from sentinel.app.telegram_adapters import (
     TelegramNotificationHandler,
     TelegramNotificationSink,
-    TelegramProcessingStateProvider,
 )
 from sentinel.chain import SharedChainConnection
 from sentinel.config import Config, clear_config, set_config
 from sentinel.module_types import ModuleType
 from sentinel.app.storage import BotStorage
-from sentinel.models import Block, Event, EventNotification
+from sentinel.app.storage_migrations import migrate_legacy_storage
+from sentinel.models import Block, Event, EventHandler, EventNotification
 from sentinel.modules.base import EventSource
 from sentinel.notifications import NotificationPlan
 from sentinel.rpc_provider import (
@@ -27,8 +28,6 @@ from sentinel.rpc_provider import (
     RpcSubscriptionReconnectRequired,
 )
 from sentinel.modules.aggregation import (
-    DEPOSITED_SIGNING_KEYS_COUNT_CHANGED,
-    TOTAL_SIGNING_KEYS_COUNT_CHANGED,
     AggregationGroup,
     AggregationGroups,
     AggregationKey,
@@ -37,11 +36,15 @@ from sentinel.modules.aggregation import (
     OperatorGroupChangeAggregator,
 )
 from sentinel.services.aggregation import AggregationCoordinator
+from sentinel.services.digest import Digest, DigestGroups, build_digests
 from sentinel.services.subscription import (
     ModuleRuntime,
     ModuleRuntimeSupervisor,
 )
 from sentinel.rpc import Subscription
+
+DEPOSIT_EVENT = "DepositedSigningKeysCountChanged"
+TOTAL_SIGNING_KEYS_COUNT_CHANGED = "TotalSigningKeysCountChanged"
 
 
 class _FakeEth:
@@ -116,6 +119,7 @@ def _make_config() -> Config:
         process_blocks_requests_per_second=None,
         block_from=None,
         admin_ids=set(),
+        deposit_digest_time=time(9, 0, tzinfo=UTC),
     )
 
 
@@ -210,6 +214,9 @@ class _FakeSubscriptionStorage:
     def state(self) -> BotStorage:
         return BotStorage(self.bot_data)
 
+    def __call__(self) -> BotStorage:
+        return self.state
+
 
 async def _wait_for(predicate, *, timeout: float = 1.0, interval: float = 0.01) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
@@ -248,21 +255,26 @@ def _make_processing_harness(
 ) -> SimpleNamespace:
     storage = _FakeSubscriptionStorage(bot_data if bot_data is not None else {})
     sink = _FakeNotificationSink()
+    aggregators = ()
+    if aggregation_group is not None:
+        aggregators = (
+            NodeOperatorEventAggregator(
+                group=aggregation_group,
+                event_names=event_names,
+            ),
+        )
     aggregation = AggregationCoordinator(
         storage=storage,
-        notification_sink=sink,
-        aggregators=(
-            (
-                NodeOperatorEventAggregator(
-                    group=aggregation_group,
-                    event_names=event_names,
-                ),
-            )
-            if aggregation_group is not None
-            else ()
-        ),
+        emit_notification=sink.emit,
+        aggregators=aggregators,
     )
     side_effects = _FakeEventSideEffects()
+    digest = Digest(
+        DigestGroups.DEPOSITED_SIGNING_KEYS,
+        DEPOSIT_EVENT,
+        lambda: storage.state.digests,
+        sink.emit,
+    )
     runtime = ModuleRuntime(
         module_adapter=cast(
             object,
@@ -273,12 +285,14 @@ def _make_processing_harness(
         event_messages=_make_event_messages(aggregation_group, event_names=event_names),
         event_side_effects=side_effects,
         aggregation=aggregation,
+        digests={digest.name: digest},
     )
     return SimpleNamespace(
         storage=storage,
         sink=sink,
         side_effects=side_effects,
         aggregation=aggregation,
+        digest=digest,
         runtime=runtime,
     )
 
@@ -305,15 +319,14 @@ async def test_rpc_disconnect_rebuilds_runtime_and_replays_after_persisted_block
             chain=chain,
             health=HealthState(),
             module_adapter=module_adapter,
-            storage=TelegramProcessingStateProvider(application),
-            notification_sink=TelegramNotificationSink(application),
+            storage=lambda: BotStorage(application.bot_data),
+            emit_notification=TelegramNotificationSink(application).emit,
         )
         original_runtime = supervisor.module_runtime
         original_runtime.raw_subscription.subscribe = AsyncMock(
             side_effect=RpcSubscriptionReconnectRequired.listener_stopped()
         )
         original_runtime.raw_subscription.abort = AsyncMock()
-        original_runtime.aggregation.close = AsyncMock()
 
         restarted = await supervisor._subscribe_until_restarted_or_stopped()
 
@@ -322,7 +335,6 @@ async def test_rpc_disconnect_rebuilds_runtime_and_replays_after_persisted_block
         assert supervisor._pending_replay_start_block == 124
         assert supervisor._health.snapshot().catchup_active is True
         original_runtime.raw_subscription.abort.assert_awaited_once()
-        original_runtime.aggregation.close.assert_awaited_once()
         assert supervisor.raw_subscription._w3 is replacement_w3  # noqa: SLF001
         assert subscription_w3_factory.call_count == 2
 
@@ -426,45 +438,25 @@ async def test_module_runtime_queues_non_aggregated_event_notification():
 
 
 @pytest.mark.asyncio
-async def test_module_runtime_logs_processed_event_and_aggregation_lifecycle(caplog):
+async def test_module_runtime_buffers_deposit_until_digest_flush(caplog):
     event = _make_signing_keys_event(
-        event_name=DEPOSITED_SIGNING_KEYS_COUNT_CHANGED,
+        event_name=DEPOSIT_EVENT,
         count=1,
         block=123,
         log_index=1,
     )
-    harness = _make_processing_harness(
-        aggregation_group=AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS,
-        event_names=frozenset({DEPOSITED_SIGNING_KEYS_COUNT_CHANGED}),
-    )
-    window_end = event.block + AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks - 1
-
+    harness = _make_processing_harness(aggregation_group=None)
     with caplog.at_level("INFO"):
         await harness.runtime.handle_event(event)
-        await harness.runtime.handle_block(Block(number=window_end))
+        notification_count = await harness.digest.flush_through(event.block)
 
     processed = next(
         record for record in caplog.records if record.getMessage() == "Event processed"
     )
-    assert processed.event_name == DEPOSITED_SIGNING_KEYS_COUNT_CHANGED
+    assert processed.event_name == DEPOSIT_EVENT
     assert processed.block == event.block
     assert processed.log_index == event.log_index
-
-    started = next(
-        record for record in caplog.records if record.getMessage() == "Aggregation started"
-    )
-    assert started.aggregation_group == AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.name
-    assert started.aggregation_key == {"kind": "node_operator", "value": "1"}
-    assert started.window_start_block == event.block
-    assert started.window_end_block == window_end
-    assert started.source_event_count == 1
-
-    flushed = next(
-        record for record in caplog.records if record.getMessage() == "Aggregation flushed"
-    )
-    assert flushed.processed_block == window_end
-    assert flushed.source_event_count == 1
-    assert flushed.notification_count == 1
+    assert notification_count == 1
     harness.sink.emit.assert_awaited_once()
 
 
@@ -859,58 +851,169 @@ async def test_total_signing_key_count_events_are_aggregated_once_per_block():
 
 
 @pytest.mark.asyncio
-async def test_deposited_signing_key_count_events_are_aggregated_separately():
-    assert AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks == 7_200
-
+async def test_deposit_digest_flushes_completed_events_and_keeps_newer_events():
     first_event = _make_signing_keys_event(
-        event_name="DepositedSigningKeysCountChanged",
+        event_name=DEPOSIT_EVENT,
         count=1,
         block=123,
         log_index=1,
     )
-    first_window_end = (
-        first_event.block + AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks - 1
-    )
-    late_same_operator_event = _make_signing_keys_event(
-        event_name="DepositedSigningKeysCountChanged",
+    last_ready_event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
         count=2,
-        block=first_window_end,
+        block=125,
         tx="0xfeedbeef",
         log_index=2,
     )
     other_operator_event = _make_signing_keys_event(
-        event_name="DepositedSigningKeysCountChanged",
+        event_name=DEPOSIT_EVENT,
         node_operator_id=2,
         count=4,
-        block=first_window_end - 1,
+        block=124,
         tx="0xcafebabe",
         log_index=3,
     )
-    harness = _make_processing_harness(
-        aggregation_group=AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS,
-        event_names=frozenset({DEPOSITED_SIGNING_KEYS_COUNT_CHANGED}),
+    newer_event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
+        count=3,
+        block=126,
+        tx="0xfacefeed",
+        log_index=4,
     )
+    harness = _make_processing_harness(aggregation_group=None)
 
-    for event in (first_event, other_operator_event, late_same_operator_event):
-        await harness.aggregation.handle_event(event)
-    await harness.aggregation.handle_block(first_window_end)
+    for event in (first_event, other_operator_event, last_ready_event, newer_event):
+        await harness.runtime.handle_event(event)
+    notification_count = await harness.digest.flush_through(last_ready_event.block)
 
+    assert notification_count == 1
     prepared = [call.args[0] for call in harness.sink.emit.await_args_list]
     assert len(prepared) == 1
-    assert prepared[0].event == "DepositedSigningKeysCountChanged"
+    assert prepared[0].event == DEPOSIT_EVENT
     assert prepared[0].args == {"nodeOperatorId": 1, "depositedKeysCount": 2}
-    assert prepared[0].source_events == (first_event, late_same_operator_event)
-
-    other_window_end = (
-        other_operator_event.block
-        + AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS.window_blocks
-        - 1
+    assert prepared[0].source_events == (
+        first_event,
+        other_operator_event,
+        last_ready_event,
     )
-    await harness.aggregation.handle_block(other_window_end)
+    assert harness.storage.state.digests.events(DigestGroups.DEPOSITED_SIGNING_KEYS) == (
+        newer_event,
+    )
 
-    second_notification = harness.sink.emit.await_args_list[1].args[0]
-    assert second_notification.args == {"nodeOperatorId": 2, "depositedKeysCount": 4}
-    assert second_notification.source_events == (other_operator_event,)
+
+@pytest.mark.asyncio
+async def test_deposit_digest_keeps_events_when_emit_fails():
+    event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
+        count=1,
+        block=123,
+        log_index=1,
+    )
+    harness = _make_processing_harness(aggregation_group=None)
+    await harness.runtime.handle_event(event)
+    harness.sink.emit.side_effect = RuntimeError("queue unavailable")
+
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        await harness.digest.flush_through(event.block)
+
+    assert harness.storage.state.digests.events(DigestGroups.DEPOSITED_SIGNING_KEYS) == (event,)
+
+
+@pytest.mark.asyncio
+async def test_deposit_digest_does_not_discard_event_added_during_emit():
+    ready_event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
+        count=1,
+        block=123,
+        log_index=1,
+    )
+    newer_event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
+        count=2,
+        block=124,
+        tx="0xfeedbeef",
+        log_index=2,
+    )
+    harness = _make_processing_harness(aggregation_group=None)
+    replacement_digest = Digest(
+        DigestGroups.DEPOSITED_SIGNING_KEYS,
+        DEPOSIT_EVENT,
+        lambda: harness.storage.state.digests,
+        harness.sink.emit,
+    )
+
+    async def append_from_replacement_runtime(_notification: EventNotification) -> None:
+        await replacement_digest.handle_event(newer_event)
+
+    await harness.digest.handle_event(ready_event)
+    harness.sink.emit.side_effect = append_from_replacement_runtime
+
+    await harness.digest.flush_through(ready_event.block)
+
+    assert harness.storage.state.digests.events(DigestGroups.DEPOSITED_SIGNING_KEYS) == (
+        newer_event,
+    )
+
+
+@pytest.mark.asyncio
+async def test_named_digests_keep_and_flush_events_independently():
+    other_digest_name = "operator_updates"
+    deposit_event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
+        count=1,
+        block=123,
+        log_index=1,
+    )
+    other_event = _make_signing_keys_event(
+        event_name=TOTAL_SIGNING_KEYS_COUNT_CHANGED,
+        count=2,
+        block=124,
+        tx="0xfeedbeef",
+        log_index=2,
+    )
+    harness = _make_processing_harness(aggregation_group=None)
+    other_digest = Digest(
+        other_digest_name,
+        TOTAL_SIGNING_KEYS_COUNT_CHANGED,
+        lambda: harness.storage.state.digests,
+        harness.sink.emit,
+    )
+    harness.runtime.digests[other_digest.name] = other_digest
+
+    await harness.runtime.handle_event(deposit_event)
+    await harness.runtime.handle_event(other_event)
+    await harness.digest.flush_through(other_event.block)
+
+    assert harness.storage.state.digests.events(DigestGroups.DEPOSITED_SIGNING_KEYS) == ()
+    assert harness.storage.state.digests.events(other_digest_name) == (other_event,)
+
+
+def test_build_digests_rejects_multiple_event_types_for_one_digest():
+    bot_data: dict = {}
+    event_handlers = {
+        event_name: SimpleNamespace(
+            event=event_name,
+            digest_name="shared_digest",
+        )
+        for event_name in (DEPOSIT_EVENT, TOTAL_SIGNING_KEYS_COUNT_CHANGED)
+    }
+
+    with pytest.raises(RuntimeError, match="assigned to multiple events"):
+        build_digests(
+            event_handlers,
+            lambda: BotStorage(bot_data).digests,
+            AsyncMock(),
+        )
+
+
+def test_event_handler_rejects_aggregation_and_digest_buffering_together():
+    with pytest.raises(ValueError, match="cannot use both aggregation and digest buffering"):
+        EventHandler(
+            event=DEPOSIT_EVENT,
+            handler=AsyncMock(),
+            aggregation_group=AggregationGroups.TOTAL_SIGNING_KEY_COUNTS,
+            digest_name=DigestGroups.DEPOSITED_SIGNING_KEYS,
+        )
 
 
 def test_operator_group_aggregator_passes_through_supporting_events_without_group_changes():
@@ -1028,9 +1131,10 @@ async def test_aggregation_window_remains_pending_when_emit_fails():
     with pytest.raises(RuntimeError, match="queue unavailable"):
         await harness.runtime.handle_block(Block(number=123))
 
+    event_names = frozenset({TOTAL_SIGNING_KEYS_COUNT_CHANGED})
     window = NodeOperatorEventAggregator(
         group=AggregationGroups.TOTAL_SIGNING_KEY_COUNTS,
-        event_names=frozenset({TOTAL_SIGNING_KEYS_COUNT_CHANGED}),
+        event_names=event_names,
     ).window_for(block_events[0])
     window = window.with_event(block_events[0]).with_event(block_events[1])
     store = BotStorage(bot_data).aggregation_windows
@@ -1099,7 +1203,6 @@ async def test_multi_block_aggregation_window_schedules_lazy_flush():
     ]
     await harness.aggregation.handle_block(102)
     harness.sink.emit.assert_awaited_once()
-    await harness.aggregation.close()
 
 
 @pytest.mark.asyncio
@@ -1147,6 +1250,44 @@ async def test_pending_aggregation_window_resumes_from_persisted_state():
     emitted = harness.sink.emit.await_args.args[0]
     assert isinstance(emitted, EventNotification)
     assert emitted.source_events == (first_event, second_event)
+
+
+def test_legacy_deposit_windows_are_migrated_to_digest_store():
+    first_event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
+        count=1,
+        block=100,
+        log_index=1,
+    )
+    second_event = _make_signing_keys_event(
+        event_name=DEPOSIT_EVENT,
+        node_operator_id=2,
+        count=4,
+        block=101,
+        tx="0xfeedbeef",
+        log_index=2,
+    )
+    bot_data = {
+        "aggregation_windows": {
+            "first": {
+                "group": "deposited_signing_key_counts",
+                "events": [first_event.to_dict()],
+            },
+            "second": {
+                "group": "deposited_signing_key_counts",
+                "events": [second_event.to_dict()],
+            },
+        }
+    }
+
+    migrate_legacy_storage(bot_data)
+    storage = BotStorage(bot_data)
+
+    assert storage.digests.events(DigestGroups.DEPOSITED_SIGNING_KEYS) == (
+        first_event,
+        second_event,
+    )
+    assert storage.aggregation_windows.pending() == []
 
 
 @pytest.mark.asyncio
@@ -1204,8 +1345,8 @@ async def test_pending_aggregation_uses_replaced_application_bot_data():
             chain=chain,
             health=HealthState(),
             module_adapter=module_adapter,
-            storage=TelegramProcessingStateProvider(application),
-            notification_sink=TelegramNotificationSink(application),
+            storage=lambda: BotStorage(application.bot_data),
+            emit_notification=TelegramNotificationSink(application).emit,
         )
 
         persisted_bot_data = {"block": 102}
@@ -1273,7 +1414,7 @@ async def test_notification_log_is_emitted_only_with_sent_messages(caplog):
 
 @pytest.mark.asyncio
 async def test_notification_log_includes_messages_sent_count(caplog):
-    plan = NotificationPlan(broadcast="Test notification")
+    plan = NotificationPlan.broadcast("Test notification")
     sub = _make_notification_handler(event_messages_return=plan)
     context = SimpleNamespace(
         bot_storage=BotStorage(
@@ -1305,6 +1446,75 @@ async def test_notification_log_includes_messages_sent_count(caplog):
 
 
 @pytest.mark.asyncio
+async def test_per_chat_notification_sends_one_filtered_digest_per_chat():
+    plan = NotificationPlan.per_chat(
+        node_operator_ids={"1", "2"},
+        render=lambda node_operator_ids: (",".join(sorted(node_operator_ids)),),
+    )
+    sub = _make_notification_handler(event_messages_return=plan)
+    context = SimpleNamespace(
+        bot_storage=BotStorage(
+            {
+                "user_ids": {100, 200, 300},
+                "group_ids": set(),
+                "channel_ids": set(),
+                "no_ids_to_chats": {
+                    "1": {100, 300},
+                    "2": {200, 300},
+                },
+            }
+        ),
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
+
+    messages_by_chat = {
+        call.kwargs["chat_id"]: call.kwargs["text"]
+        for call in context.bot.send_message.await_args_list
+    }
+    assert messages_by_chat == {
+        100: "1",
+        200: "2",
+        300: "1,2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_per_chat_renderer_selects_specific_message_or_fallback():
+    plan = NotificationPlan.per_chat(
+        {"1", "2"},
+        lambda node_operator_ids: ("specific",) if "1" in node_operator_ids else ("fallback",),
+    )
+    sub = _make_notification_handler(event_messages_return=plan)
+    context = SimpleNamespace(
+        bot_storage=BotStorage(
+            {
+                "user_ids": {100, 200, 300},
+                "group_ids": set(),
+                "channel_ids": set(),
+                "no_ids_to_chats": {
+                    "1": {100, 300},
+                    "2": {200, 300},
+                },
+            }
+        ),
+        bot=SimpleNamespace(send_message=AsyncMock()),
+    )
+
+    await sub.handle_event_log(EventNotification.from_event(_make_event(block=200)), context)
+
+    messages_by_chat: dict[int, list[str]] = {}
+    for call in context.bot.send_message.await_args_list:
+        messages_by_chat.setdefault(call.kwargs["chat_id"], []).append(call.kwargs["text"])
+    assert messages_by_chat == {
+        100: ["specific"],
+        200: ["fallback"],
+        300: ["specific"],
+    }
+
+
+@pytest.mark.asyncio
 async def test_handle_event_log_does_not_regress_persisted_block():
     sub = _make_notification_handler(event_messages_return=None)
     context = _make_context(block=500)
@@ -1316,11 +1526,7 @@ async def test_handle_event_log_does_not_regress_persisted_block():
 
 @pytest.mark.asyncio
 async def test_handle_event_log_does_not_advance_block_with_notification_plan():
-    plan = SimpleNamespace(
-        per_node_operator={},
-        broadcast=None,
-        broadcast_node_operator_ids=None,
-    )
+    plan = NotificationPlan.broadcast("Test notification")
     sub = _make_notification_handler(event_messages_return=plan)
     context = _make_context(block=100)
 
@@ -1331,7 +1537,7 @@ async def test_handle_event_log_does_not_advance_block_with_notification_plan():
 
 @pytest.mark.asyncio
 async def test_handle_curated_release_broadcast_reaches_chats_without_subscriptions():
-    plan = NotificationPlan(broadcast="Curated Module is live!")
+    plan = NotificationPlan.broadcast("Curated Module is live!")
     sub = _make_notification_handler(event_messages_return=plan)
     context = SimpleNamespace(
         bot_storage=BotStorage(

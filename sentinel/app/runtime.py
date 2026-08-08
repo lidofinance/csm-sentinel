@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from sentinel.app.telegram_adapters import TelegramNotificationHandler
     from sentinel.chain import SharedChainConnection
     from sentinel.jobs import JobContext
-    from sentinel.modules.base import ModuleAdapter
+    from sentinel.modules.base import BaseModuleAdapter
     from sentinel.services.subscription import ModuleRuntimeSupervisor
 
 
@@ -32,5 +32,5 @@ class BotRuntime:
         return self.module_supervisor.cfg
 
     @property
-    def module_adapter(self) -> "ModuleAdapter":
+    def module_adapter(self) -> "BaseModuleAdapter":
         return self.module_supervisor.module_runtime.module_adapter

@@ -6,7 +6,7 @@ from async_lru import alru_cache
 from sentinel.config import get_config
 from sentinel.models import Event, EventHandler, EventNotification
 from sentinel.modules.distribution import DistributionLogFetcher
-from sentinel.notifications import NotificationPlan
+from sentinel.notifications import BroadcastDelivery, NotificationPlan
 
 MessageTemplate = Callable[..., str]
 
@@ -32,7 +32,7 @@ class EventMessageEngineBase:
         return await self._distribution_log_fetcher(log_cid)
 
     async def default(self, event: EventNotification):
-        return NotificationPlan(broadcast=f"Event {event.event} emitted with data: \n{event.args}")
+        return NotificationPlan.broadcast(f"Event {event.event} emitted with data: \n{event.args}")
 
     async def get_notification_plan(self, event: EventNotification):
         if event.event not in self.module_adapter.notifiable_events():
@@ -48,15 +48,16 @@ class EventMessageEngineBase:
             return None
 
         plan = (
-            result if isinstance(result, NotificationPlan) else NotificationPlan(broadcast=result)
+            result if isinstance(result, NotificationPlan) else NotificationPlan.broadcast(result)
         )
 
-        if (
-            plan.broadcast
-            and plan.broadcast_node_operator_ids is None
-            and "nodeOperatorId" in event.args
-        ):
-            plan.with_broadcast_targets({event.args["nodeOperatorId"]})
+        delivery = plan.delivery
+        if isinstance(delivery, BroadcastDelivery):
+            if delivery.operator_ids is None and "nodeOperatorId" in event.args:
+                return NotificationPlan.broadcast_to_operators(
+                    delivery.message,
+                    {event.args["nodeOperatorId"]},
+                )
 
         return plan
 

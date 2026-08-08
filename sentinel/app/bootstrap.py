@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from contextlib import suppress
+from functools import cache
 from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
@@ -15,11 +16,11 @@ from sentinel.app.logging import register_sensitive_environment, register_sensit
 from sentinel.app.module_adapter import build_module_adapter_from_config
 from sentinel.app.runtime import BotRuntime
 from sentinel.app.secrets import load_environment_files
-from sentinel.app.storage import create_persistence
+from sentinel.app.storage import BotStorage, create_persistence
+from sentinel.app.storage_migrations import migrate_legacy_storage
 from sentinel.app.telegram_adapters import (
     TelegramNotificationHandler,
     TelegramNotificationSink,
-    TelegramProcessingStateProvider,
 )
 from sentinel.chain import SharedChainConnection
 from sentinel.config import load_config_from_env, set_config
@@ -158,29 +159,36 @@ async def create_runtime() -> BotRuntime:
         chain = SharedChainConnection(rpc_provider)
         module_adapter = build_module_adapter_from_config(cfg, rpc_provider, chain)
 
-        processing_state = TelegramProcessingStateProvider(application)
+        @cache
+        def storage() -> BotStorage:
+            return BotStorage(application.bot_data)
+
+        notification_sink = TelegramNotificationSink(application)
         module_supervisor = ModuleRuntimeSupervisor(
             create_subscription_w3,
             config=cfg,
             chain=chain,
             health=health,
             module_adapter=module_adapter,
-            storage=processing_state,
-            notification_sink=TelegramNotificationSink(application),
+            storage=storage,
+            emit_notification=notification_sink.emit,
             backfill_w3=backfill_provider,
         )
         notification_handler = TelegramNotificationHandler(
             application,
             lambda: module_supervisor.event_messages,
         )
-        job_context = JobContext(module_supervisor, secret_bundle=secret_bundle)
+        job_context = JobContext(
+            module_supervisor.get_block_number,
+            config=cfg,
+            digest_names=module_supervisor.digest_names,
+            secret_bundle=secret_bundle,
+        )
         DEFAULT_METRICS.chain.bind(
             health=health,
-            processed_block=lambda: processing_state.state.block.value,
+            processed_block=lambda: storage().block.value,
         )
-        DEFAULT_METRICS.aggregation.bind(
-            lambda: len(processing_state.state.aggregation_windows.pending())
-        )
+        DEFAULT_METRICS.aggregation.bind(lambda: len(storage().aggregation_windows.pending()))
 
         runtime = BotRuntime(
             application=application,
@@ -223,6 +231,7 @@ async def _run(runtime: BotRuntime) -> None:
         raise RuntimeError("Application updater is not configured; cannot start polling")
 
     await application.initialize()
+    migrate_legacy_storage(application.bot_data)
     await application.start()
     application.add_error_handler(error_handler)
 

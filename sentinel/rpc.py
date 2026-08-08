@@ -17,7 +17,7 @@ from sentinel.models import (
     Event,
     Block,
 )
-from sentinel.modules.base import ModuleAdapter
+from sentinel.modules.base import BaseModuleAdapter
 from sentinel.rpc_provider import (
     RpcAvailabilityError,
     RpcSubscriptionReconnectRequired,
@@ -50,7 +50,7 @@ class Subscription:
         w3: AsyncWeb3,
         *,
         health: HealthState,
-        module_adapter: ModuleAdapter,
+        module_adapter: BaseModuleAdapter,
         backfill_w3: AsyncWeb3 | None = None,
         ignore_subscription_events_until_block: int | None = None,
     ):
