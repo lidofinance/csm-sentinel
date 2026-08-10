@@ -15,19 +15,21 @@ from sentinel.modules.community.texts import (
     event_transaction_footer_tx_only,
 )
 from sentinel.modules.distribution import DistributionLogFetcher, default_distribution_log_fetcher
+from sentinel.services.digest import DigestGroups
 from sentinel.modules.registry import RegisterEventHandler
 
 if TYPE_CHECKING:
-    from sentinel.modules.base import ModuleAdapter
+    from sentinel.modules.base import BaseModuleAdapter
 
 COMMUNITY_EVENTS_TO_FOLLOW: dict[str, EventHandler] = {}
 
 
-def register_event(event_name: str, aggregation_group=None):
+def register_event(event_name: str, aggregation_group=None, digest_name: str | None = None):
     return RegisterEventHandler(
         COMMUNITY_EVENTS_TO_FOLLOW,
         event_name,
         aggregation_group=aggregation_group,
+        digest_name=digest_name,
     )
 
 
@@ -51,7 +53,7 @@ class CommunityEventMessages(BaseModule):
 
     def __init__(
         self,
-        module_adapter: "ModuleAdapter",
+        module_adapter: "BaseModuleAdapter",
         distribution_log_fetcher: "DistributionLogFetcher | None" = None,
     ):
         self._distribution_log_fetcher = (
@@ -105,7 +107,7 @@ class CommunityEventMessages(BaseModule):
 
 register_event(
     "DepositedSigningKeysCountChanged",
-    aggregation_group=AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS,
+    digest_name=DigestGroups.DEPOSITED_SIGNING_KEYS,
 )(CommunityEventMessages.deposited_signing_keys_count_changed)
 register_event(
     "TotalSigningKeysCountChanged",

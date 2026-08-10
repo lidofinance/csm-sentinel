@@ -1,56 +1,18 @@
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING
 
 from sentinel.metrics.aggregation import AggregationMetricsMiddleware
 from sentinel.metrics.registry import DEFAULT_METRICS
 from sentinel.models import Event, EventNotification
-from sentinel.modules.aggregation import (
-    AggregationKey,
-    AggregationWindow,
-    EventAggregator,
-)
+from sentinel.modules.aggregation import AggregationWindow, EventAggregator
 
 DEFAULT_AGGREGATION_METRICS = AggregationMetricsMiddleware(DEFAULT_METRICS.aggregation)
 logger = logging.getLogger(__name__)
 
-
-class BlockProgressStore(Protocol):
-    value: int
-
-    def update(self, block: int) -> None: ...
-
-
-class AggregationWindowStore(Protocol):
-    def pending(self) -> list[AggregationWindow]: ...
-
-    def pending_for(
-        self,
-        group: str,
-        aggregation_key: AggregationKey,
-        block: int,
-    ) -> AggregationWindow | None: ...
-
-    def upsert_pending(self, window: AggregationWindow) -> None: ...
-
-    def discard(self, window: AggregationWindow) -> None: ...
-
-
-class ProcessingState(Protocol):
-    @property
-    def block(self) -> BlockProgressStore: ...
-
-    @property
-    def aggregation_windows(self) -> AggregationWindowStore: ...
-
-
-class ProcessingStateProvider(Protocol):
-    @property
-    def state(self) -> ProcessingState: ...
-
-
-class NotificationSink(Protocol):
-    async def emit(self, notification: EventNotification) -> None: ...
+if TYPE_CHECKING:
+    from sentinel.app.storage import AggregationWindowStore, BotStorage
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,13 +27,13 @@ class AggregationCoordinator:
     def __init__(
         self,
         *,
-        storage: ProcessingStateProvider,
-        notification_sink: NotificationSink,
+        storage: Callable[[], "BotStorage"],
+        emit_notification: Callable[[EventNotification], Awaitable[None]],
         aggregators: tuple[EventAggregator, ...],
         metrics: AggregationMetricsMiddleware = DEFAULT_AGGREGATION_METRICS,
     ) -> None:
         self._storage = storage
-        self._notification_sink = notification_sink
+        self._emit_notification = emit_notification
         self._metrics = metrics
         self._aggregators_by_group = {
             aggregator.group.name: aggregator for aggregator in aggregators
@@ -83,8 +45,8 @@ class AggregationCoordinator:
         }
 
     @property
-    def _aggregation_windows(self) -> AggregationWindowStore:
-        return self._storage.state.aggregation_windows
+    def _aggregation_windows(self) -> "AggregationWindowStore":
+        return self._storage().aggregation_windows
 
     @property
     def pending_window_count(self) -> int:
@@ -98,10 +60,7 @@ class AggregationCoordinator:
         await self._flush_ready_windows(block)
 
     async def resume_pending(self) -> None:
-        await self._flush_ready_windows(self._storage.state.block.value)
-
-    async def close(self) -> None:
-        pass
+        await self._flush_ready_windows(self._storage().block.value)
 
     async def _prepare(self, event: Event) -> PreparedNotifications:
         aggregator = self._aggregators_by_event.get(event.event)
@@ -200,6 +159,6 @@ class AggregationCoordinator:
 
     async def _emit_prepared(self, prepared: PreparedNotifications) -> None:
         for notification in prepared.notifications:
-            await self._notification_sink.emit(notification)
+            await self._emit_notification(notification)
         if prepared.completed_window is not None:
             self._aggregation_windows.discard(prepared.completed_window)

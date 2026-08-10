@@ -26,6 +26,7 @@ from sentinel.modules.distribution import (
     parse_distribution_log,
     validator_sort_key,
 )
+from sentinel.services.digest import DigestGroups
 from sentinel.modules.formatting import read_field
 from sentinel.modules.registry import RegisterEventHandler
 from sentinel.notifications import NotificationPlan
@@ -37,11 +38,12 @@ CURATED_EVENTS_TO_FOLLOW: dict[str, EventHandler] = {}
 logger = logging.getLogger(__name__)
 
 
-def register_event(event_name: str, aggregation_group=None):
+def register_event(event_name: str, aggregation_group=None, digest_name: str | None = None):
     return RegisterEventHandler(
         CURATED_EVENTS_TO_FOLLOW,
         event_name,
         aggregation_group=aggregation_group,
+        digest_name=digest_name,
     )
 
 
@@ -172,6 +174,9 @@ class CuratedEventMessages(BaseModule):
         if not metadata.name:
             return f"#{node_operator_id}"
         return f"#{node_operator_id} - {metadata.name}"
+
+    async def _digest_operator_label(self, node_operator_id: int, block: int) -> str:
+        return await self._node_operator_label(node_operator_id, block)
 
     async def _sub_node_operator_allocations(self, group_info, block: int) -> list[dict]:
         sub_node_operators = _sub_node_operators(group_info)
@@ -360,7 +365,7 @@ class CuratedEventMessages(BaseModule):
             await self._sub_node_operator_allocations(group_info, event.block),
             group_name=_operator_group_name(group_info),
         ) + await self.notification_footer(event)
-        return NotificationPlan(broadcast=message).with_broadcast_targets(operator_ids)
+        return NotificationPlan.broadcast_to_operators(message, operator_ids)
 
     @register_event("OperatorGroupUpdated")
     async def operator_group_updated(self, event: EventNotification):
@@ -393,7 +398,7 @@ class CuratedEventMessages(BaseModule):
                 old_group_name=previous_group_name,
                 new_group_name=current_group_name,
             ) + await self.notification_footer(event)
-            return NotificationPlan(broadcast=message).with_broadcast_targets(operator_ids)
+            return NotificationPlan.broadcast_to_operators(message, operator_ids)
 
         previous_operators = {
             int(read_field(operator, "nodeOperatorId", 0)): operator
@@ -407,7 +412,7 @@ class CuratedEventMessages(BaseModule):
         }
         target_operator_ids = changed_operator_ids | (set(current_shares) if is_renamed else set())
         footer = await self.notification_footer(event)
-        plan = NotificationPlan().with_broadcast_targets(target_operator_ids)
+        operator_messages: dict[int, str] = {}
         for node_operator_id in target_operator_ids:
             if node_operator_id not in changed_operator_ids:
                 message = template(
@@ -450,8 +455,8 @@ class CuratedEventMessages(BaseModule):
                     old_group_name=previous_group_name if is_renamed else None,
                     new_group_name=current_group_name if is_renamed else None,
                 )
-            plan.add_node_operator_message(node_operator_id, f"{message}{footer}")
-        return plan
+            operator_messages[node_operator_id] = f"{message}{footer}"
+        return NotificationPlan.per_operator(operator_messages)
 
     @register_event("OperatorGroupCleared")
     async def operator_group_cleared(self, event: EventNotification):
@@ -467,7 +472,7 @@ class CuratedEventMessages(BaseModule):
             await self._sub_node_operator_labels(previous_group, event.block - 1),
             group_name=_operator_group_name(previous_group),
         ) + await self.notification_footer(event)
-        return NotificationPlan(broadcast=message).with_broadcast_targets(operator_ids)
+        return NotificationPlan.broadcast_to_operators(message, operator_ids)
 
     @register_event("BondCurveWeightSet")
     async def bond_curve_weight_set(self, event: EventNotification):
@@ -479,15 +484,15 @@ class CuratedEventMessages(BaseModule):
         if not operator_ids:
             return None
 
-        plan = NotificationPlan()
+        operator_messages: dict[int, str] = {}
         for node_operator_id in operator_ids:
             targeted_event = replace(
                 event.primary_event, args=dict(event.args) | {"nodeOperatorId": node_operator_id}
             )
-            plan.add_node_operator_message(
-                node_operator_id, f"{message}{await self.event_footer(targeted_event)}"
+            operator_messages[node_operator_id] = (
+                f"{message}{await self.event_footer(targeted_event)}"
             )
-        return plan
+        return NotificationPlan.per_operator(operator_messages)
 
     @register_event("OperatorMetadataSet")
     async def operator_metadata_set(self, event: EventNotification):
@@ -498,7 +503,7 @@ class CuratedEventMessages(BaseModule):
         template = self._require_message_template(event.event)
         base_message = template()
         footer = await self.notification_footer(event)
-        plan = NotificationPlan(broadcast=f"{base_message}{footer}")
+        fallback_message = f"{base_message}{footer}"
 
         log_cid = event.args.get("logCid")
         try:
@@ -509,21 +514,38 @@ class CuratedEventMessages(BaseModule):
                 log_cid,
                 exc,
             )
-            return plan
+            return NotificationPlan.broadcast(fallback_message)
 
         summary = parse_distribution_log(distribution_log)
 
-        if summary.all_operator_ids:
-            plan.with_broadcast_targets(summary.all_operator_ids)
-
+        operator_messages: dict[str, str] = {}
         for operator_id, flagged in summary.strikes_per_operator.items():
             flagged_sorted = sorted(flagged, key=lambda item: validator_sort_key(item[0]))
             node_operator_label = await self._node_operator_label(int(operator_id), event.block)
-            plan.add_node_operator_message(
-                operator_id, f"{template(node_operator_label, flagged_sorted)}{footer}"
+            operator_messages[str(operator_id)] = (
+                f"{template(node_operator_label, flagged_sorted)}{footer}"
             )
 
-        return plan
+        if not operator_messages:
+            if summary.all_operator_ids:
+                return NotificationPlan.broadcast_to_operators(
+                    fallback_message,
+                    summary.all_operator_ids,
+                )
+            return NotificationPlan.broadcast(fallback_message)
+
+        def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
+            messages = tuple(
+                operator_messages[node_operator_id]
+                for node_operator_id in sorted(
+                    node_operator_ids,
+                    key=lambda value: int(value),
+                )
+                if node_operator_id in operator_messages
+            )
+            return messages or (fallback_message,)
+
+        return NotificationPlan.per_chat(summary.all_operator_ids, render)
 
     async def _node_operator_ids_for_bond_curve(self, curve_id: int, block: int) -> set[int]:
         operators_count = await self.module.functions.getNodeOperatorsCount().call(
@@ -541,7 +563,7 @@ class CuratedEventMessages(BaseModule):
 
 register_event(
     "DepositedSigningKeysCountChanged",
-    aggregation_group=AggregationGroups.DEPOSITED_SIGNING_KEY_COUNTS,
+    digest_name=DigestGroups.DEPOSITED_SIGNING_KEYS,
 )(CuratedEventMessages.deposited_signing_keys_count_changed)
 register_event(
     "TotalSigningKeysCountChanged",

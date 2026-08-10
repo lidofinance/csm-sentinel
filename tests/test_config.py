@@ -1,5 +1,6 @@
 import subprocess
 import sys
+from datetime import UTC, time
 
 import pytest
 
@@ -53,6 +54,26 @@ def test_load_config_reads_module_envs(monkeypatch):
 
     assert cfg.module_address == "0x0000000000000000000000000000000000000001"
     assert cfg.module_ui_url == "https://module.example"
+
+
+def test_load_config_reads_deposit_digest_time_as_utc(monkeypatch):
+    monkeypatch.setenv("WEB3_SOCKET_PROVIDERS", "wss://example.invalid/ws")
+    monkeypatch.setenv("MODULE_ADDRESS", "0x0000000000000000000000000000000000000001")
+    monkeypatch.setenv("DEPOSIT_DIGEST_TIME", "17:45")
+
+    cfg = load_config_from_env()
+
+    assert cfg.deposit_digest_time == time(17, 45, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("value", ["17:45:01", "17:45+05:00", "midday"])
+def test_load_config_rejects_invalid_deposit_digest_time(monkeypatch, value):
+    monkeypatch.setenv("WEB3_SOCKET_PROVIDERS", "wss://example.invalid/ws")
+    monkeypatch.setenv("MODULE_ADDRESS", "0x0000000000000000000000000000000000000001")
+    monkeypatch.setenv("DEPOSIT_DIGEST_TIME", value)
+
+    with pytest.raises(RuntimeError, match="DEPOSIT_DIGEST_TIME"):
+        load_config_from_env()
 
 
 def test_load_config_leaves_module_ui_unset(monkeypatch):

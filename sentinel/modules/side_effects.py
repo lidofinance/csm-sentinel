@@ -1,13 +1,7 @@
-from typing import Protocol
-
 from sentinel.models import Event
 from sentinel.modules.community.adapter import CommunityModuleAdapter
 from sentinel.modules.curated.adapter import CuratedModuleAdapter
 from sentinel.modules.formatting import read_field
-
-
-class EventSideEffectProcessor(Protocol):
-    async def process_event(self, event: Event) -> None: ...
 
 
 class NodeOperatorCountProcessor:
@@ -32,6 +26,9 @@ class CuratedMetadataCacheProcessor:
             int(event.args["nodeOperatorId"]),
             read_field(event.args["metadata"], "name", 0) or None,
         )
+
+
+EventSideEffectProcessor = NodeOperatorCountProcessor | CuratedMetadataCacheProcessor
 
 
 class ModuleEventSideEffects:

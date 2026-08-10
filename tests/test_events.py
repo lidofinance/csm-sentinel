@@ -4,6 +4,12 @@ from types import SimpleNamespace
 
 from sentinel.chain import SharedChainConnection
 from sentinel.config import clear_config, get_config, set_config
+from sentinel.notifications import (
+    BroadcastDelivery,
+    NotificationPlan,
+    OperatorMessagesDelivery,
+    PerChatDelivery,
+)
 from sentinel.modules.community.texts import (
     bond_debt_covered,
     bond_debt_increased,
@@ -15,6 +21,30 @@ from sentinel.modules.community.texts import (
     validator_slashing_reported,
 )
 from hexbytes import HexBytes
+
+
+def _broadcast(plan: NotificationPlan) -> str | None:
+    delivery = plan.delivery
+    if isinstance(delivery, BroadcastDelivery):
+        return delivery.message
+    return None
+
+
+def _broadcast_operator_ids(plan: NotificationPlan) -> frozenset[str] | None:
+    delivery = plan.delivery
+    if isinstance(delivery, BroadcastDelivery):
+        return delivery.operator_ids
+    return None
+
+
+def _operator_messages(plan: NotificationPlan):
+    assert isinstance(plan.delivery, OperatorMessagesDelivery)
+    return plan.delivery.messages
+
+
+def _per_chat(plan: NotificationPlan) -> PerChatDelivery:
+    assert isinstance(plan.delivery, PerChatDelivery)
+    return plan.delivery
 
 
 def _notification(event):
@@ -444,10 +474,12 @@ async def test_fee_splits_set_reads_previous_fee_splits_at_previous_block():
     assert [call.calls for call in accounting.fee_split_call_objects] == [
         [{"block_identifier": 122}]
     ]
-    assert "Fee splits changed" in plan.broadcast
-    assert "Previous fee splits" in plan.broadcast
-    assert "70%: `0x111`" in plan.broadcast
-    assert "30%: `0x222`" in plan.broadcast
+    message = _broadcast(plan)
+    assert message is not None
+    assert "Fee splits changed" in message
+    assert "Previous fee splits" in message
+    assert "70%: `0x111`" in message
+    assert "30%: `0x222`" in message
 
 
 def test_limit_set_mode_1():
@@ -754,20 +786,20 @@ async def test_distribution_log_updated_produces_strike_notifications():
     )
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids == {"42", "777"}
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"42", "777"}
 
     expected_base = texts.distribution_data_updated()
     expected_foot = await event_messages.event_footer(event)
-    assert plan.broadcast == f"{expected_base}{expected_foot}"
-
-    assert "42" in plan.per_node_operator
-    operator_message = plan.per_node_operator["42"]
+    fallback_message = f"{expected_base}{expected_foot}"
+    (operator_message,) = delivery.render(frozenset({"42"}))
     assert expected_base in operator_message
     assert "⚠️" in operator_message
     assert "Validators with strikes: `1`" in operator_message
     assert operator_message.endswith(expected_foot)
 
-    assert "777" not in plan.per_node_operator
+    assert delivery.render(frozenset({"777"})) == (fallback_message,)
+    assert delivery.render(frozenset({"42", "777"})) == (operator_message,)
     assert fetch_calls == ["cid123"]
 
 
@@ -803,11 +835,10 @@ async def test_distribution_log_updated_handles_empty_payload():
     )
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.per_node_operator == {}
-    assert plan.broadcast_node_operator_ids is None
+    assert _broadcast_operator_ids(plan) is None
     expected_base = texts.distribution_data_updated()
     expected_foot = await event_messages.event_footer(event)
-    assert plan.broadcast == f"{expected_base}{expected_foot}"
+    assert _broadcast(plan) == f"{expected_base}{expected_foot}"
 
 
 @pytest.mark.asyncio
@@ -854,12 +885,15 @@ async def test_curated_distribution_log_updated_enriches_strike_operator_name():
     assert isinstance(plan, NotificationPlan)
     expected_base = texts.distribution_data_updated()
     expected_foot = await event_messages.event_footer(event)
-    assert plan.broadcast == f"{expected_base}{expected_foot}"
-    assert plan.broadcast_node_operator_ids == {"42", "777"}
-    assert set(plan.per_node_operator) == {"42"}
-    assert "Node Operator: `\\#42 \\- Operator Forty Two`" in plan.per_node_operator["42"]
-    assert "Operator ID" not in plan.per_node_operator["42"]
-    assert "Validators with strikes: `1`" in plan.per_node_operator["42"]
+    fallback_message = f"{expected_base}{expected_foot}"
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"42", "777"}
+    (operator_message,) = delivery.render(frozenset({"42"}))
+    assert "Node Operator: `\\#42 \\- Operator Forty Two`" in operator_message
+    assert "Operator ID" not in operator_message
+    assert "Validators with strikes: `1`" in operator_message
+    assert delivery.render(frozenset({"777"})) == (fallback_message,)
+    assert delivery.render(frozenset({"42", "777"})) == (operator_message,)
     assert meta_registry.metadata_ids == [42]
     assert meta_registry.metadata_calls[0].calls == [{"block_identifier": 123}]
 
@@ -909,7 +943,10 @@ async def test_get_notification_plan_sets_node_operator_target():
 
     event_messages = CommunityEventMessages.__new__(CommunityEventMessages)
     event_messages.chain = _DummyConnectProvider()
-    event_messages.cfg = SimpleNamespace(etherscan_tx_url_template="https://etherscan.io/tx/{}")
+    event_messages.cfg = SimpleNamespace(
+        etherscan_tx_url_template="https://etherscan.io/tx/{}",
+        etherscan_block_url_template="https://etherscan.io/block/{}",
+    )
     event_messages.module_adapter = DummyAdapter()
     event_messages.module = _FakeCuratedModule(
         0, {321: SimpleNamespace(totalAddedKeys=0, totalDepositedKeys=0)}
@@ -928,8 +965,9 @@ async def test_get_notification_plan_sets_node_operator_target():
     plan = await CommunityEventMessages.get_notification_plan(event_messages, _notification(event))
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids == {"321"}
-    assert plan.broadcast is not None
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"321"}
+    assert "Deposit digest" in delivery.render(frozenset({"321"}))[0]
 
 
 def test_curated_event_messages_reconfigure_extends_base_bindings():
@@ -970,7 +1008,7 @@ async def test_curated_get_notification_plan_uses_inherited_base_handler():
             module=module,
             accounting=object(),
             parameters_registry=object(),
-            meta_registry=_FakeMetaRegistry(),
+            meta_registry=_FakeMetaRegistry(metadata_names={42: "Galaxy - PTO"}),
         ),
         notifiable_events={"DepositedSigningKeysCountChanged"},
     )
@@ -988,10 +1026,15 @@ async def test_curated_get_notification_plan_uses_inherited_base_handler():
     plan = await event_messages.get_notification_plan(_notification(event))
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids == {"42"}
-    assert "Keys were deposited" in plan.broadcast
-    assert "Deposited keys count: `1 \\-\\> 3`" in plan.broadcast
-    assert "nodeOperatorId: 42" in plan.broadcast
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"42"}
+    (message,) = delivery.render(frozenset({"42"}))
+    assert message == (
+        "🤩 *Deposit digest*\n\n"
+        "Node Operators:\n"
+        "\\- \\#42 \\- Galaxy \\- PTO: `1 \\-\\> 3`\n\n"
+        "Block: [123](https://etherscan.io/block/123)"
+    )
     assert module.node_operator_calls == [42]
     assert module.node_operator_call_objects[0].calls == [{"block_identifier": 122}]
 
@@ -1019,9 +1062,11 @@ async def test_curated_resumed_builds_temporary_release_broadcast():
 
     assert adapter.staking_module_id_refreshes == 1
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids is None
-    assert "Curated Module is live" in plan.broadcast
-    assert "Transaction" in plan.broadcast
+    assert _broadcast_operator_ids(plan) is None
+    message = _broadcast(plan)
+    assert message is not None
+    assert "Curated Module is live" in message
+    assert "Transaction" in message
 
 
 @pytest.mark.asyncio
@@ -1040,12 +1085,12 @@ async def test_curated_footer_enriches_node_operator_name_and_caches_metadata():
             parameters_registry=object(),
             meta_registry=meta_registry,
         ),
-        notifiable_events={"DepositedSigningKeysCountChanged"},
+        notifiable_events={"TotalSigningKeysCountChanged"},
     )
     event_messages = CuratedEventMessages(adapter, distribution_log_fetcher=_FakeFetcher(result={}))
     event = Event(
-        event="DepositedSigningKeysCountChanged",
-        args={"nodeOperatorId": 42, "depositedKeysCount": 3},
+        event="TotalSigningKeysCountChanged",
+        args={"nodeOperatorId": 42, "totalKeysCount": 3},
         block=123,
         tx=HexBytes("0xdeadbeef"),
         address="0x0000000000000000000000000000000000000000",
@@ -1056,9 +1101,11 @@ async def test_curated_footer_enriches_node_operator_name_and_caches_metadata():
     first_plan = await event_messages.get_notification_plan(_notification(event))
     second_plan = await event_messages.get_notification_plan(_notification(event))
 
-    assert "Node Operator: \\#42 \\- Lido Test Operator" in first_plan.broadcast
-    assert "description" not in first_plan.broadcast.lower()
-    assert second_plan.broadcast == first_plan.broadcast
+    first_message = _broadcast(first_plan)
+    assert first_message is not None
+    assert "Node Operator: \\#42 \\- Lido Test Operator" in first_message
+    assert "description" not in first_message.lower()
+    assert _broadcast(second_plan) == first_message
     assert meta_registry.metadata_ids == [42]
     assert meta_registry.metadata_calls[0].calls == [{"block_identifier": 123}]
 
@@ -1078,12 +1125,12 @@ async def test_curated_footer_falls_back_when_metadata_fetch_fails():
             parameters_registry=object(),
             meta_registry=_FakeMetaRegistry(metadata_exc=TimeoutError("metadata unavailable")),
         ),
-        notifiable_events={"DepositedSigningKeysCountChanged"},
+        notifiable_events={"TotalSigningKeysCountChanged"},
     )
     event_messages = CuratedEventMessages(adapter, distribution_log_fetcher=_FakeFetcher(result={}))
     event = Event(
-        event="DepositedSigningKeysCountChanged",
-        args={"nodeOperatorId": 42, "depositedKeysCount": 3},
+        event="TotalSigningKeysCountChanged",
+        args={"nodeOperatorId": 42, "totalKeysCount": 3},
         block=123,
         tx=HexBytes("0xdeadbeef"),
         address="0x0000000000000000000000000000000000000000",
@@ -1093,8 +1140,10 @@ async def test_curated_footer_falls_back_when_metadata_fetch_fails():
 
     plan = await event_messages.get_notification_plan(_notification(event))
 
-    assert "nodeOperatorId: 42" in plan.broadcast
-    assert "Node Operator: \\#42" not in plan.broadcast
+    message = _broadcast(plan)
+    assert message is not None
+    assert "nodeOperatorId: 42" in message
+    assert "Node Operator: \\#42" not in message
 
 
 @pytest.mark.asyncio
@@ -1119,12 +1168,14 @@ async def test_curated_bond_deposited_eth_formats_tx_only_message():
     plan = await event_messages.get_notification_plan(_notification(event))
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids is None
-    assert "Bond deposited" in plan.broadcast
-    assert "Asset:" not in plan.broadcast
-    assert "Amount: `1 ETH`" in plan.broadcast
-    assert "nodeOperatorId" not in plan.broadcast
-    assert "[Transaction](https://etherscan.io/tx/0xdeadbeef)" in plan.broadcast
+    assert _broadcast_operator_ids(plan) is None
+    message = _broadcast(plan)
+    assert message is not None
+    assert "Bond deposited" in message
+    assert "Asset:" not in message
+    assert "Amount: `1 ETH`" in message
+    assert "nodeOperatorId" not in message
+    assert "[Transaction](https://etherscan.io/tx/0xdeadbeef)" in message
 
 
 @pytest.mark.asyncio
@@ -1170,15 +1221,17 @@ async def test_curated_operator_group_created_targets_all_added_sub_node_operato
     plan = await event_messages.get_notification_plan(_notification(event))
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids == {"10", "11"}
-    assert "Operator group created" in plan.broadcast
-    assert "Group: `7: Test Group`" in plan.broadcast
-    assert "Added Node Operators" in plan.broadcast
-    assert "Operator Ten" in plan.broadcast
-    assert "Weighted share: 50% \\(group share: 0\\.04%\\)" in plan.broadcast
-    assert "Effective weight" not in plan.broadcast
-    assert "Operator Eleven" in plan.broadcast
-    assert "Weighted share: 50% \\(group share: 0\\.01%\\)" in plan.broadcast
+    assert _broadcast_operator_ids(plan) == {"10", "11"}
+    message = _broadcast(plan)
+    assert message is not None
+    assert "Operator group created" in message
+    assert "Group: `7: Test Group`" in message
+    assert "Added Node Operators" in message
+    assert "Operator Ten" in message
+    assert "Weighted share: 50% \\(group share: 0\\.04%\\)" in message
+    assert "Effective weight" not in message
+    assert "Operator Eleven" in message
+    assert "Weighted share: 50% \\(group share: 0\\.01%\\)" in message
     assert meta_registry.metadata_ids == [10, 11]
     assert [call.calls for call in meta_registry.metadata_calls] == [
         [{"block_identifier": 123}],
@@ -1245,24 +1298,23 @@ async def test_curated_operator_group_updated_targets_only_changed_sub_node_oper
     assert isinstance(plan, NotificationPlan)
     assert meta_registry.group_ids == [7]
     assert meta_registry.call.calls == [{"block_identifier": 122}]
-    assert plan.broadcast is None
-    assert plan.broadcast_node_operator_ids == {"10", "11", "12"}
-    assert set(plan.per_node_operator) == {"10", "11", "12"}
-    assert "Changes:" in plan.per_node_operator["10"]
-    assert "Updated \\#10 \\- Operator Ten" in plan.per_node_operator["10"]
-    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in plan.per_node_operator["10"]
-    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in plan.per_node_operator["10"]
-    assert "Effective weight" not in plan.per_node_operator["10"]
-    assert "Node Operator:" not in plan.per_node_operator["10"]
-    assert "Removed \\#11 \\- Operator Eleven" in plan.per_node_operator["11"]
-    assert "Previous Share: `0\\.01%`" in plan.per_node_operator["11"]
-    assert "Previous Effective allocation share: `50%`" in plan.per_node_operator["11"]
-    assert "Node Operator:" not in plan.per_node_operator["11"]
-    assert "Added \\#12 \\- Operator Twelve" in plan.per_node_operator["12"]
-    assert "Share: `0\\.02%`" in plan.per_node_operator["12"]
-    assert "Effective allocation share: `66\\.66%`" in plan.per_node_operator["12"]
-    assert "Effective weight" not in plan.per_node_operator["12"]
-    assert "Node Operator:" not in plan.per_node_operator["12"]
+    operator_messages = _operator_messages(plan)
+    assert set(operator_messages) == {"10", "11", "12"}
+    assert "Changes:" in operator_messages["10"]
+    assert "Updated \\#10 \\- Operator Ten" in operator_messages["10"]
+    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in operator_messages["10"]
+    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in operator_messages["10"]
+    assert "Effective weight" not in operator_messages["10"]
+    assert "Node Operator:" not in operator_messages["10"]
+    assert "Removed \\#11 \\- Operator Eleven" in operator_messages["11"]
+    assert "Previous Share: `0\\.01%`" in operator_messages["11"]
+    assert "Previous Effective allocation share: `50%`" in operator_messages["11"]
+    assert "Node Operator:" not in operator_messages["11"]
+    assert "Added \\#12 \\- Operator Twelve" in operator_messages["12"]
+    assert "Share: `0\\.02%`" in operator_messages["12"]
+    assert "Effective allocation share: `66\\.66%`" in operator_messages["12"]
+    assert "Effective weight" not in operator_messages["12"]
+    assert "Node Operator:" not in operator_messages["12"]
     assert meta_registry.operator_weight_ids == [[10, 11], [10, 12]]
     assert [call.calls for call in meta_registry.operator_weight_calls] == [
         [{"block_identifier": 122}],
@@ -1353,19 +1405,18 @@ async def test_curated_operator_group_batch_renders_net_diff_for_clear_and_creat
     plan = await event_messages.get_notification_plan(notifications[0])
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast is None
-    assert plan.broadcast_node_operator_ids == {"10", "11", "12"}
-    assert set(plan.per_node_operator) == {"10", "11", "12"}
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in plan.per_node_operator["10"]
-    assert "Updated \\#10 \\- Operator Ten" in plan.per_node_operator["10"]
-    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in plan.per_node_operator["10"]
-    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in plan.per_node_operator["10"]
-    assert "Removed \\#11 \\- Operator Eleven" in plan.per_node_operator["11"]
-    assert "Previous Effective allocation share: `50%`" in plan.per_node_operator["11"]
-    assert "Added \\#12 \\- Operator Twelve" in plan.per_node_operator["12"]
-    assert "Share: `0\\.02%`" in plan.per_node_operator["12"]
-    assert "Effective allocation share: `66\\.66%`" in plan.per_node_operator["12"]
-    assert "Operator effective weight changed" not in "".join(plan.per_node_operator.values())
+    operator_messages = _operator_messages(plan)
+    assert set(operator_messages) == {"10", "11", "12"}
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["10"]
+    assert "Updated \\#10 \\- Operator Ten" in operator_messages["10"]
+    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in operator_messages["10"]
+    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in operator_messages["10"]
+    assert "Removed \\#11 \\- Operator Eleven" in operator_messages["11"]
+    assert "Previous Effective allocation share: `50%`" in operator_messages["11"]
+    assert "Added \\#12 \\- Operator Twelve" in operator_messages["12"]
+    assert "Share: `0\\.02%`" in operator_messages["12"]
+    assert "Effective allocation share: `66\\.66%`" in operator_messages["12"]
+    assert "Operator effective weight changed" not in "".join(operator_messages.values())
 
 
 @pytest.mark.asyncio
@@ -1420,12 +1471,13 @@ async def test_curated_operator_group_updated_notifies_group_name_change():
     assert isinstance(plan, NotificationPlan)
     assert meta_registry.group_ids == [7]
     assert meta_registry.call.calls == [{"block_identifier": 122}]
-    assert plan.broadcast_node_operator_ids == {"10", "11"}
-    assert plan.per_node_operator == {}
-    assert "Operator group updated" in plan.broadcast
-    assert "Group: `7`" in plan.broadcast
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in plan.broadcast
-    assert "Node Operator:" not in plan.broadcast
+    assert _broadcast_operator_ids(plan) == {"10", "11"}
+    message = _broadcast(plan)
+    assert message is not None
+    assert "Operator group updated" in message
+    assert "Group: `7`" in message
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in message
+    assert "Node Operator:" not in message
     assert meta_registry.operator_weight_ids == []
 
 
@@ -1487,17 +1539,17 @@ async def test_curated_operator_group_updated_notifies_unchanged_operators_on_gr
     plan = await event_messages.get_notification_plan(_notification(event))
 
     assert isinstance(plan, NotificationPlan)
-    assert plan.broadcast_node_operator_ids == {"10", "11", "12"}
-    assert set(plan.per_node_operator) == {"10", "11", "12"}
-    assert "Group: `7`" in plan.per_node_operator["10"]
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in plan.per_node_operator["10"]
-    assert "Node Operator:" not in plan.per_node_operator["10"]
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in plan.per_node_operator["11"]
-    assert "Node Operator:" not in plan.per_node_operator["11"]
-    assert "Added \\#12 \\- Operator Twelve" in plan.per_node_operator["12"]
-    assert "Operator Twelve" in plan.per_node_operator["12"]
-    assert "Group: `7`" in plan.per_node_operator["12"]
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in plan.per_node_operator["12"]
+    operator_messages = _operator_messages(plan)
+    assert set(operator_messages) == {"10", "11", "12"}
+    assert "Group: `7`" in operator_messages["10"]
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["10"]
+    assert "Node Operator:" not in operator_messages["10"]
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["11"]
+    assert "Node Operator:" not in operator_messages["11"]
+    assert "Added \\#12 \\- Operator Twelve" in operator_messages["12"]
+    assert "Operator Twelve" in operator_messages["12"]
+    assert "Group: `7`" in operator_messages["12"]
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["12"]
 
 
 @pytest.mark.asyncio
@@ -1543,20 +1595,22 @@ async def test_curated_operator_group_cleared_lists_all_affected_node_operators(
     assert isinstance(plan, NotificationPlan)
     assert meta_registry.group_ids == [7]
     assert meta_registry.call.calls == [{"block_identifier": 122}]
-    assert plan.broadcast_node_operator_ids == {"10", "11"}
-    assert "Operator group cleared" in plan.broadcast
-    assert "Group: `7: Test Group`" in plan.broadcast
-    assert "Affected Node Operators" in plan.broadcast
-    assert "Operator Ten" in plan.broadcast
-    assert "Weighted share" not in plan.broadcast
-    assert "group share" not in plan.broadcast
+    assert _broadcast_operator_ids(plan) == {"10", "11"}
+    message = _broadcast(plan)
+    assert message is not None
+    assert "Operator group cleared" in message
+    assert "Group: `7: Test Group`" in message
+    assert "Affected Node Operators" in message
+    assert "Operator Ten" in message
+    assert "Weighted share" not in message
+    assert "group share" not in message
     assert (
         "These Node Operators will no longer receive deposit allocation through this group"
-        in plan.broadcast
+        in message
     )
-    assert "Effective weight" not in plan.broadcast
-    assert "Operator Eleven" in plan.broadcast
-    assert "nodeOperatorId" not in plan.broadcast
+    assert "Effective weight" not in message
+    assert "Operator Eleven" in message
+    assert "nodeOperatorId" not in message
     assert meta_registry.operator_weight_ids == []
     assert meta_registry.operator_weight_calls == []
 
@@ -1595,13 +1649,13 @@ async def test_curated_bond_curve_weight_set_targets_mapped_node_operators():
     assert isinstance(plan, NotificationPlan)
     assert module.operators_count_call.calls == [{"block_identifier": 123}]
     assert accounting.curve_id_calls == [0, 1, 2]
-    assert plan.broadcast is None
-    assert set(plan.per_node_operator) == {"0", "2"}
-    assert "Operator type weight changed" in plan.per_node_operator["0"]
-    assert "Type id: `1`" in plan.per_node_operator["0"]
-    assert "New weight: `50000`" in plan.per_node_operator["0"]
-    assert "Node Operator: \\#0 \\- Operator Zero" in plan.per_node_operator["0"]
-    assert "Node Operator: \\#2 \\- Operator Two" in plan.per_node_operator["2"]
+    operator_messages = _operator_messages(plan)
+    assert set(operator_messages) == {"0", "2"}
+    assert "Operator type weight changed" in operator_messages["0"]
+    assert "Type id: `1`" in operator_messages["0"]
+    assert "New weight: `50000`" in operator_messages["0"]
+    assert "Node Operator: \\#0 \\- Operator Zero" in operator_messages["0"]
+    assert "Node Operator: \\#2 \\- Operator Two" in operator_messages["2"]
 
 
 @pytest.mark.asyncio
@@ -2004,7 +2058,7 @@ async def test_deposited_signing_keys_count_changed_handler_renders_aggregated_e
     source_events = (
         Event(
             event="DepositedSigningKeysCountChanged",
-            args={"nodeOperatorId": 42, "depositedKeysCount": 1},
+            args={"nodeOperatorId": 42, "depositedKeysCount": 2},
             block=123,
             tx=HexBytes("0xdeadbeef"),
             address="0x0000000000000000000000000000000000000000",
@@ -2023,14 +2077,17 @@ async def test_deposited_signing_keys_count_changed_handler_renders_aggregated_e
     )
     event = EventNotification(source_events=source_events)
 
-    message = await CommunityEventMessages.deposited_signing_keys_count_changed(
-        event_messages, event
-    )
+    plan = await CommunityEventMessages.deposited_signing_keys_count_changed(event_messages, event)
+    (message,) = _per_chat(plan).render(frozenset({"42"}))
 
-    assert "Keys were deposited" in message
-    assert "Deposited keys count: `1 \\-\\> 3`" in message
-    assert "nodeOperatorId: 42" in message
-    assert "Block: [123](https://etherscan.io/block/123)" in message
+    assert message == (
+        "🤩 *Deposit digest*\n\n"
+        "Node Operators:\n"
+        "\\- \\#42: `1 \\-\\> 3`\n\n"
+        "Block: [123](https://etherscan.io/block/123)"
+    )
+    assert event_messages.module.node_operator_calls == [42]
+    assert event_messages.module.node_operator_call_objects[0].calls == [{"block_identifier": 122}]
 
 
 @pytest.mark.asyncio

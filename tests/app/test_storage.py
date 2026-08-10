@@ -1,3 +1,7 @@
+from datetime import UTC, datetime
+
+from hexbytes import HexBytes
+
 from sentinel.app.storage import (
     BlockState,
     BotStorage,
@@ -9,7 +13,9 @@ from sentinel.app.storage import (
     normalise_node_operator_ids,
     normalise_node_operator_map,
 )
+from sentinel.models import Event
 from sentinel.modules.aggregation import AggregationKey, AggregationWindow
+from sentinel.services.digest import DigestGroups
 
 
 # _ensure_int_set
@@ -317,6 +323,52 @@ def test_aggregation_window_store_drops_legacy_records():
 
     assert store.pending() == []
     assert bot_data["aggregation_windows"] == {}
+
+
+def test_digest_store_persists_and_deduplicates_events():
+    bot_data: dict[str, object] = {}
+    store = BotStorage(bot_data).digests
+    event = Event(
+        event="DepositedSigningKeysCountChanged",
+        args={"nodeOperatorId": 42, "depositedKeysCount": 3},
+        block=123,
+        tx=HexBytes("0xdeadbeef"),
+        address="0x0000000000000000000000000000000000000000",
+        log_index=1,
+        transaction_index=0,
+    )
+
+    store.append(DigestGroups.DEPOSITED_SIGNING_KEYS, event)
+    store.append(DigestGroups.DEPOSITED_SIGNING_KEYS, event)
+
+    assert BotStorage(bot_data).digests.events(DigestGroups.DEPOSITED_SIGNING_KEYS) == (event,)
+    assert bot_data["digests"] == {DigestGroups.DEPOSITED_SIGNING_KEYS: [event.to_dict()]}
+
+
+def test_scheduled_job_store_persists_completed_boundary():
+    bot_data: dict[str, object] = {}
+    store = BotStorage(bot_data).scheduled_jobs
+    scheduled_for = datetime(2026, 8, 8, 9, 0, tzinfo=UTC)
+
+    store.mark_completed("deposit_digest", scheduled_for)
+
+    assert bot_data["scheduled_jobs"] == {
+        "deposit_digest": {"completed_for": "2026-08-08T09:00:00+00:00"}
+    }
+    assert BotStorage(bot_data).scheduled_jobs.completed_for("deposit_digest") == scheduled_for
+
+
+def test_scheduled_job_store_ignores_malformed_records():
+    bot_data = {
+        "scheduled_jobs": {
+            "deposit_digest": {"completed_for": "not-a-datetime"},
+        }
+    }
+
+    store = BotStorage(bot_data).scheduled_jobs
+
+    assert store.completed_for("deposit_digest") is None
+    assert bot_data["scheduled_jobs"] == {}
 
 
 # NodeOperatorSubscriptions

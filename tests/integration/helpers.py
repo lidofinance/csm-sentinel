@@ -15,6 +15,7 @@ from sentinel.models import EventNotification
 from sentinel.app.health import HealthState
 from sentinel.module_types import ModuleType
 from sentinel.services.subscription import ModuleRuntimeSupervisor, build_module_runtime
+from sentinel.services.digest import DigestGroups
 
 
 @dataclass
@@ -169,7 +170,7 @@ class EventReplayHarness:
             health=HealthState(),
             module_adapter=module_adapter,
             storage=self._storage,
-            notification_sink=self._notification_sink,
+            emit_notification=self._notification_sink.emit,
             backfill_w3=backfill_w3,
         )
         self.raw_subscription = self.runtime.raw_subscription
@@ -182,6 +183,11 @@ class EventReplayHarness:
 
     async def subscribe(self) -> None:
         await self.raw_subscription.subscribe()
+
+    async def flush_digest(self, through_block: int) -> int:
+        return await self.runtime.digests[DigestGroups.DEPOSITED_SIGNING_KEYS].flush_through(
+            through_block
+        )
 
     async def wait_until_subscribed(self, *, timeout: float = 10.0) -> None:
         await self.raw_subscription.wait_until_subscribed(timeout=timeout)
@@ -211,6 +217,9 @@ class _InMemoryProcessingStateProvider:
     def state(self) -> BotStorage:
         return BotStorage(self._bot_data)
 
+    def __call__(self) -> BotStorage:
+        return self.state
+
 
 class _RecordingNotificationSink:
     def __init__(self) -> None:
@@ -231,10 +240,11 @@ class _RecordingNotificationSink:
             tx: HexBytes("0xdeadbeef" if index == 0 else f"0x{index:08x}")
             for index, tx in enumerate(source_txs)
         }
-        for event in notification.source_events:
-            event.tx = stable_txs[event.tx]
-        plan = await event_messages.get_notification_plan(notification)
-        for event in notification.source_events:
+        stable_notification = EventNotification(
+            tuple(replace(event, tx=stable_txs[event.tx]) for event in notification.source_events)
+        )
+        plan = await event_messages.get_notification_plan(stable_notification)
+        for event in stable_notification.source_events:
             self.processed_events.append((event, plan))
 
 
@@ -261,7 +271,7 @@ class ModuleSupervisorHarness:
             health=HealthState(),
             module_adapter=module_adapter,
             storage=self._storage,
-            notification_sink=self._notification_sink,
+            emit_notification=self._notification_sink.emit,
             backfill_w3=backfill_w3,
         )
         self._notification_sink.event_messages_provider = lambda: self.supervisor.event_messages

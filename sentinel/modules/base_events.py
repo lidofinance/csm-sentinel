@@ -4,13 +4,14 @@ from typing import Any
 
 from eth_utils import humanize_wei
 
-from sentinel.models import EventNotification
+from sentinel.models import Event, EventNotification
 from sentinel.modules.distribution import (
     DistributionLogFetcher,
     parse_distribution_log,
     validator_sort_key,
 )
 from sentinel.modules.event_engine import EventMessageEngineBase
+from sentinel.modules.formatting import block_footer_tx_only
 from sentinel.notifications import NotificationPlan
 
 logger = logging.getLogger(__name__)
@@ -37,13 +38,42 @@ class BaseModule(EventMessageEngineBase):
         self.parametersRegistry = module_adapter.contracts.parameters_registry
 
     async def deposited_signing_keys_count_changed(self, event: EventNotification):
-        first_event = event.source_events[0]
         template = self._require_message_template(event.event)
-        node_operator = await self.module.functions.getNodeOperator(
-            event.args["nodeOperatorId"]
-        ).call(block_identifier=first_event.block - 1)
-        footer = await self.notification_footer(event)
-        return template(event.args["depositedKeysCount"], node_operator.totalDepositedKeys) + footer
+        events_by_operator: dict[int, list[Event]] = {}
+        for source_event in event.source_events:
+            node_operator_id = int(source_event.args["nodeOperatorId"])
+            events_by_operator.setdefault(node_operator_id, []).append(source_event)
+
+        entries_by_operator: dict[str, tuple[str, int, int]] = {}
+        for node_operator_id, operator_events in sorted(events_by_operator.items()):
+            first_event = operator_events[0]
+            last_event = operator_events[-1]
+            # The event contains post-state, so read the operator before its first digest event.
+            node_operator = await self.module.functions.getNodeOperator(node_operator_id).call(
+                block_identifier=first_event.block - 1
+            )
+            entries_by_operator[str(node_operator_id)] = (
+                await self._digest_operator_label(node_operator_id, last_event.block),
+                int(node_operator.totalDepositedKeys),
+                int(last_event.args["depositedKeysCount"]),
+            )
+
+        footer = await self.digest_footer(event)
+
+        def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
+            entries = [
+                entries_by_operator[node_operator_id]
+                for node_operator_id in sorted(
+                    node_operator_ids,
+                    key=lambda value: int(value),
+                )
+            ]
+            return (template(entries) + footer,)
+
+        return NotificationPlan.per_chat(
+            node_operator_ids=entries_by_operator,
+            render=render,
+        )
 
     async def total_signing_keys_count_changed(self, event: EventNotification):
         first_event = event.source_events[0]
@@ -109,6 +139,17 @@ class BaseModule(EventMessageEngineBase):
 
     async def block_footer(self, event: EventNotification) -> str:
         raise NotImplementedError
+
+    async def digest_footer(self, event: EventNotification) -> str:
+        start_block, end_block = self.notification_block_range(event)
+        block_links = [(str(start_block), self.block_link(start_block))]
+        if end_block != start_block:
+            block_links.append((str(end_block), self.block_link(end_block)))
+        return block_footer_tx_only(block_links).as_markdown()
+
+    async def _digest_operator_label(self, node_operator_id: int, block: int) -> str:
+        _ = block
+        return f"#{node_operator_id}"
 
     async def key_allocated_balance_changed(self, event: EventNotification):
         template = self._require_message_template(event.event)
@@ -261,7 +302,7 @@ class BaseModule(EventMessageEngineBase):
         template = self._require_message_template(event.event)
         base_message = template()
         footer = await self.notification_footer(event)
-        plan = NotificationPlan(broadcast=f"{base_message}{footer}")
+        fallback_message = f"{base_message}{footer}"
 
         log_cid = event.args.get("logCid")
         try:
@@ -272,17 +313,32 @@ class BaseModule(EventMessageEngineBase):
                 log_cid,
                 exc,
             )
-            return plan
+            return NotificationPlan.broadcast(fallback_message)
 
         summary = parse_distribution_log(distribution_log)
 
-        if summary.all_operator_ids:
-            plan.with_broadcast_targets(summary.all_operator_ids)
-
+        operator_messages: dict[str, str] = {}
         for operator_id, flagged in summary.strikes_per_operator.items():
             flagged_sorted = sorted(flagged, key=lambda item: validator_sort_key(item[0]))
-            plan.add_node_operator_message(
-                operator_id, f"{template(operator_id, flagged_sorted)}{footer}"
-            )
+            operator_messages[str(operator_id)] = f"{template(operator_id, flagged_sorted)}{footer}"
 
-        return plan
+        if not operator_messages:
+            if summary.all_operator_ids:
+                return NotificationPlan.broadcast_to_operators(
+                    fallback_message,
+                    summary.all_operator_ids,
+                )
+            return NotificationPlan.broadcast(fallback_message)
+
+        def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
+            messages = tuple(
+                operator_messages[node_operator_id]
+                for node_operator_id in sorted(
+                    node_operator_ids,
+                    key=lambda value: int(value),
+                )
+                if node_operator_id in operator_messages
+            )
+            return messages or (fallback_message,)
+
+        return NotificationPlan.per_chat(summary.all_operator_ids, render)

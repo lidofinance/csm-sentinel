@@ -1,14 +1,25 @@
 from pathlib import Path
+from datetime import UTC, datetime, time
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from hexbytes import HexBytes
 
 from sentinel.app.storage import BotStorage
 from sentinel.app.secrets import SecretBundle
-from sentinel.jobs import JobContext, ALERT_INTERVAL_MINUTES
+from sentinel.config import Config
+from sentinel.jobs import JobContext, ALERT_INTERVAL_MINUTES, latest_scheduled_for
 from sentinel.modules.community.texts import CommunityTexts
 from sentinel.modules.community.texts import NO_NEW_BLOCKS_ADMIN_ALERT
+from sentinel.models import Event
+from sentinel.services.digest import DigestGroups
+
+DIGEST_TIME = time(9, 0, tzinfo=UTC)
+NOW = datetime(2026, 8, 8, 10, 0, tzinfo=UTC)
+TEST_CONFIG = cast(Config, SimpleNamespace(deposit_digest_time=DIGEST_TIME))
+DIGEST_NAMES = frozenset({DigestGroups.DEPOSITED_SIGNING_KEYS})
 
 
 class StubBot:
@@ -34,12 +45,31 @@ def _make_subscription(chain_head: int = 0) -> SimpleNamespace:
     return sub
 
 
+def test_job_context_rejects_registered_digest_without_job():
+    with pytest.raises(RuntimeError, match="Digest jobs do not match registered digests"):
+        JobContext(
+            _make_subscription().get_block_number,
+            config=TEST_CONFIG,
+            digest_names=frozenset({*DIGEST_NAMES, "unscheduled_digest"}),
+        )
+
+
 @pytest.mark.asyncio
 async def test_scheduled_jobs_have_distinct_names(tmp_path: Path):
-    app = SimpleNamespace(job_queue=SimpleNamespace(run_repeating=Mock()))
+    app = SimpleNamespace(
+        bot_data={},
+        job_queue=SimpleNamespace(
+            run_repeating=Mock(),
+            run_daily=Mock(),
+            run_once=Mock(),
+        ),
+    )
     job_context = JobContext(
-        _make_subscription(),
+        _make_subscription().get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
         secret_bundle=SecretBundle(tmp_path / "secrets.env", 1),
+        now=lambda: NOW,
     )
 
     await job_context.schedule(app)
@@ -49,6 +79,143 @@ async def test_scheduled_jobs_have_distinct_names(tmp_path: Path):
         "chain_head_poll",
         "secret_rotation_check",
     ]
+    app.job_queue.run_daily.assert_called_once()
+    assert app.job_queue.run_daily.call_args.kwargs == {
+        "name": "deposit_digest",
+        "time": DIGEST_TIME,
+    }
+    app.job_queue.run_once.assert_not_called()
+    assert BotStorage(app.bot_data).scheduled_jobs.completed_for("deposit_digest") == datetime(
+        2026, 8, 8, 9, 0, tzinfo=UTC
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_jobs_skip_recovery_for_completed_boundary():
+    bot_data: dict = {}
+    BotStorage(bot_data).scheduled_jobs.mark_completed(
+        "deposit_digest",
+        datetime(2026, 8, 8, 9, 0, tzinfo=UTC),
+    )
+    app = SimpleNamespace(
+        bot_data=bot_data,
+        job_queue=SimpleNamespace(
+            run_repeating=Mock(),
+            run_daily=Mock(),
+            run_once=Mock(),
+        ),
+    )
+    job_context = JobContext(
+        _make_subscription().get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+        now=lambda: NOW,
+    )
+
+    await job_context.schedule(app)
+
+    app.job_queue.run_once.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_jobs_recover_pending_digest_without_completion_marker():
+    bot_data: dict = {}
+    BotStorage(bot_data).digests.append(
+        DigestGroups.DEPOSITED_SIGNING_KEYS,
+        Event(
+            event="DepositedSigningKeysCountChanged",
+            args={"nodeOperatorId": 42, "depositedKeysCount": 37},
+            block=123,
+            tx=HexBytes("0xdeadbeef"),
+            address="0x0000000000000000000000000000000000000000",
+            log_index=0,
+            transaction_index=0,
+        ),
+    )
+    app = SimpleNamespace(
+        bot_data=bot_data,
+        job_queue=SimpleNamespace(
+            run_repeating=Mock(),
+            run_daily=Mock(),
+            run_once=Mock(),
+        ),
+    )
+    job_context = JobContext(
+        _make_subscription().get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+        now=lambda: NOW,
+    )
+
+    await job_context.schedule(app)
+
+    assert app.job_queue.run_once.call_args.kwargs == {
+        "name": "deposit_digest_recovery",
+        "when": 0,
+    }
+    assert BotStorage(bot_data).scheduled_jobs.completed_for("deposit_digest") is None
+
+
+@pytest.mark.asyncio
+async def test_scheduled_jobs_recover_missed_boundary():
+    bot_data: dict = {}
+    BotStorage(bot_data).scheduled_jobs.mark_completed(
+        "deposit_digest",
+        datetime(2026, 8, 7, 9, 0, tzinfo=UTC),
+    )
+    app = SimpleNamespace(
+        bot_data=bot_data,
+        job_queue=SimpleNamespace(
+            run_repeating=Mock(),
+            run_daily=Mock(),
+            run_once=Mock(),
+        ),
+    )
+    job_context = JobContext(
+        _make_subscription().get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+        now=lambda: NOW,
+    )
+
+    await job_context.schedule(app)
+
+    assert app.job_queue.run_once.call_args.kwargs == {
+        "name": "deposit_digest_recovery",
+        "when": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_deposit_digest_job_flushes_through_processed_block():
+    supervisor = SimpleNamespace(flush_digest=AsyncMock(return_value=1))
+    context = SimpleNamespace(
+        bot_storage=BotStorage({"block": 123}),
+        runtime=SimpleNamespace(module_supervisor=supervisor),
+    )
+    job_context = JobContext(
+        _make_subscription(123).get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+        now=lambda: NOW,
+    )
+
+    assert await job_context._flush_deposit_digest(context) is True
+    supervisor.flush_digest.assert_awaited_once_with(DigestGroups.DEPOSITED_SIGNING_KEYS, 123)
+    assert context.bot_storage.scheduled_jobs.completed_for("deposit_digest") == datetime(
+        2026, 8, 8, 9, 0, tzinfo=UTC
+    )
+
+    assert await job_context._flush_deposit_digest(context) is True
+    supervisor.flush_digest.assert_awaited_once()
+
+
+def test_latest_scheduled_for_uses_calendar_boundary():
+    assert latest_scheduled_for(
+        datetime(2026, 8, 8, 8, 59, tzinfo=UTC),
+        DIGEST_TIME,
+    ) == datetime(2026, 8, 7, 9, 0, tzinfo=UTC)
+    assert latest_scheduled_for(NOW, DIGEST_TIME) == datetime(2026, 8, 8, 9, 0, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -65,7 +232,9 @@ async def test_secret_rotation_job_stops_subscription_on_new_version(tmp_path: P
         runtime=SimpleNamespace(module_supervisor=supervisor),
     )
     job_context = JobContext(
-        _make_subscription(),
+        _make_subscription().get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
         secret_bundle=SecretBundle(secrets, 1),
     )
 
@@ -85,7 +254,9 @@ async def test_secret_rotation_job_ignores_loaded_version(tmp_path: Path):
     )
     context = SimpleNamespace(runtime=SimpleNamespace(module_supervisor=supervisor))
     job_context = JobContext(
-        _make_subscription(),
+        _make_subscription().get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
         secret_bundle=SecretBundle(secrets, 1),
     )
 
@@ -98,7 +269,11 @@ async def test_secret_rotation_job_ignores_loaded_version(tmp_path: Path):
 async def test_no_alert_when_chain_head_not_polled():
     bot = StubBot()
     context = _make_context({1}, block=100, bot=bot)
-    job_context = JobContext(_make_subscription())
+    job_context = JobContext(
+        _make_subscription().get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+    )
 
     # chain_head is 0 (not yet polled) -> no alert
     await job_context.callback_block_processing_check(context)
@@ -112,7 +287,11 @@ async def test_no_alert_on_first_check_after_poll():
     context = _make_context({1}, block=0, bot=bot)
 
     sub = _make_subscription(chain_head)
-    job_context = JobContext(sub)
+    job_context = JobContext(
+        sub.get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+    )
     job_context._chain_head = chain_head
 
     await job_context.callback_block_processing_check(context)
@@ -128,7 +307,11 @@ async def test_alert_when_chain_head_does_not_advance():
     context = _make_context(admin_ids, block=0, bot=bot)
 
     sub = _make_subscription(chain_head)
-    job_context = JobContext(sub)
+    job_context = JobContext(
+        sub.get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+    )
     job_context._last_checked_chain_head = chain_head
     job_context._chain_head = chain_head
 
@@ -148,7 +331,11 @@ async def test_alert_only_once_until_chain_head_advances():
     context = _make_context(admin_ids, block=0, bot=bot)
 
     sub = _make_subscription(chain_head)
-    job_context = JobContext(sub)
+    job_context = JobContext(
+        sub.get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+    )
     job_context._last_checked_chain_head = chain_head
     job_context._chain_head = chain_head
 
@@ -175,7 +362,11 @@ async def test_alert_only_once_until_chain_head_advances():
 @pytest.mark.asyncio
 async def test_poll_chain_head():
     sub = _make_subscription(999_999)
-    job_context = JobContext(sub)
+    job_context = JobContext(
+        sub.get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+    )
     context = _make_context({1}, block=100, bot=StubBot())
 
     await job_context._poll_chain_head(context)
@@ -188,7 +379,11 @@ async def test_poll_chain_head():
 async def test_poll_chain_head_failure_does_not_crash():
     sub = _make_subscription()
     sub.get_block_number = AsyncMock(side_effect=Exception("connection lost"))
-    job_context = JobContext(sub)
+    job_context = JobContext(
+        sub.get_block_number,
+        config=TEST_CONFIG,
+        digest_names=DIGEST_NAMES,
+    )
     job_context._chain_head = 42
 
     await job_context._poll_chain_head(None)

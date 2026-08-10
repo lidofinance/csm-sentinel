@@ -292,13 +292,26 @@ def event_block_footer_tx_only(block_links: list[tuple[str, str]]) -> Text:
 
 
 @register_event_message("DepositedSigningKeysCountChanged")
-def deposited_signing_keys_count_changed(count, count_before):
+def deposited_signing_keys_count_changed(entries: list[tuple[str, int, int]]):
+    lines = []
+    for label, count_before, count in entries:
+        if lines:
+            lines.append(nl(1))
+        lines.extend(
+            (
+                "- ",
+                label,
+                ": ",
+                Code(f"{count_before} -> {count}"),
+            )
+        )
     return markdown(
         "🤩 ",
-        Bold("Keys were deposited!"),
+        Bold("Deposit digest"),
         nl(),
-        "Deposited keys count: ",
-        Code(f"{count_before} -> {count}"),
+        "Node Operators:",
+        nl(1),
+        *lines,
     )
 
 
