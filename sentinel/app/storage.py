@@ -11,6 +11,7 @@ from typing import Any, Dict, Set
 from telegram.ext import BasePersistence, PicklePersistence
 
 from sentinel.models import Event
+from sentinel.module_types import ModuleType
 from sentinel.modules.aggregation import AggregationKey, AggregationWindow
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,86 @@ def create_persistence(storage_path: Path) -> BasePersistence:
     """Return the persistence backend used by the bot."""
 
     return PicklePersistence(filepath=storage_path / "persistence.pkl")
+
+
+class RuntimeIdentityMismatch(RuntimeError):
+    """Raised when persisted state belongs to another runtime."""
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeIdentity:
+    """Chain and module identity owning persisted Sentinel state."""
+
+    KEY = "runtime_identity"
+    SCHEMA_VERSION = 1
+
+    chain_id: int
+    module_address: str
+    module_type: ModuleType
+
+    def __post_init__(self) -> None:
+        if isinstance(self.chain_id, bool) or self.chain_id <= 0:
+            raise ValueError("chain_id must be a positive integer")
+        if not self.module_address:
+            raise ValueError("module_address must not be empty")
+        object.__setattr__(self, "module_address", self.module_address.lower())
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "chain_id": self.chain_id,
+            "module_address": self.module_address,
+            "module_type": self.module_type.value,
+        }
+
+    def bind(self, bot_data: MutableMapping[str, Any]) -> bool:
+        """Bind legacy state or verify that existing state belongs to this runtime."""
+
+        if self.KEY not in bot_data:
+            bot_data[self.KEY] = self.to_dict()
+            return True
+
+        persisted = self.from_dict(bot_data[self.KEY])
+        if persisted != self:
+            raise RuntimeIdentityMismatch(
+                f"Persisted runtime identity {persisted.to_dict()} does not match "
+                f"configured runtime {self.to_dict()}"
+            )
+        return False
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "RuntimeIdentity":
+        try:
+            schema_version = value["schema_version"]
+            chain_id = value["chain_id"]
+            module_address = value["module_address"]
+            module_type = value["module_type"]
+        except (KeyError, TypeError) as exc:
+            raise RuntimeError("Persisted runtime identity is malformed") from exc
+
+        if (
+            isinstance(schema_version, bool)
+            or not isinstance(schema_version, int)
+            or schema_version != cls.SCHEMA_VERSION
+            or isinstance(chain_id, bool)
+            or not isinstance(chain_id, int)
+            or chain_id <= 0
+            or not isinstance(module_address, str)
+            or not module_address
+            or not isinstance(module_type, str)
+        ):
+            raise RuntimeError("Persisted runtime identity is malformed")
+
+        try:
+            parsed_module_type = ModuleType(module_type)
+        except ValueError as exc:
+            raise RuntimeError("Persisted runtime identity is malformed") from exc
+
+        return cls(
+            chain_id=chain_id,
+            module_address=module_address,
+            module_type=parsed_module_type,
+        )
 
 
 def ensure_int_set(values: Any) -> Set[int]:

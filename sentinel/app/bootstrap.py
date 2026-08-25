@@ -16,7 +16,7 @@ from sentinel.app.logging import register_sensitive_environment, register_sensit
 from sentinel.app.module_adapter import build_module_adapter_from_config
 from sentinel.app.runtime import BotRuntime
 from sentinel.app.secrets import load_environment_files
-from sentinel.app.storage import BotStorage, create_persistence
+from sentinel.app.storage import BotStorage, RuntimeIdentity, create_persistence
 from sentinel.app.storage_migrations import migrate_legacy_storage
 from sentinel.app.telegram_adapters import (
     TelegramNotificationHandler,
@@ -56,6 +56,24 @@ def _resolve_backfill_start_block(
 
     checkpoint = normalize_block_number(persisted_block)
     return checkpoint + 1 if checkpoint > 0 else 0
+
+
+async def _bind_persistence_runtime(
+    application: SentinelApplication,
+    runtime_identity: RuntimeIdentity,
+) -> None:
+    persistence = application.persistence
+    if persistence is None:
+        raise RuntimeError("Persistence is required for runtime identity binding")
+    if not runtime_identity.bind(application.bot_data):
+        return
+
+    await application.update_persistence()
+    await persistence.flush()
+    logger.info(
+        "Bound persistence to runtime identity",
+        extra={"runtime_identity": runtime_identity.to_dict()},
+    )
 
 
 async def create_runtime() -> BotRuntime:
@@ -117,6 +135,9 @@ async def create_runtime() -> BotRuntime:
 
     try:
         await reads_provider.validate_endpoint_chain_ids()
+        chain_id = rpc_endpoint_pool.chain_id
+        if chain_id is None:
+            raise RuntimeError("RPC chain ID is unavailable after endpoint validation")
         addresses = await discover_contract_addresses(rpc_provider, env_cfg.module_address)
         log_discovered_addresses(addresses)
         cfg = env_cfg.resolve(addresses)
@@ -199,6 +220,11 @@ async def create_runtime() -> BotRuntime:
             health=health,
             health_server=health_server,
             heartbeat_task=heartbeat_task,
+            runtime_identity=RuntimeIdentity(
+                chain_id=chain_id,
+                module_address=addresses.module,
+                module_type=addresses.module_type,
+            ),
         )
         application.attach_runtime(runtime)
         return runtime
@@ -231,13 +257,15 @@ async def _run(runtime: BotRuntime) -> None:
         raise RuntimeError("Application updater is not configured; cannot start polling")
 
     await application.initialize()
-    migrate_legacy_storage(application.bot_data)
     await application.start()
     application.add_error_handler(error_handler)
 
     heartbeat_task = runtime.heartbeat_task
     module_supervisor_task: asyncio.Task[None] | None = None
+    polling_started = False
     try:
+        await _bind_persistence_runtime(application, runtime.runtime_identity)
+        migrate_legacy_storage(application.bot_data)
         persisted_block = application.bot_data.get("block")
         module_supervisor.ensure_state_containers()
         runtime.health.mark_warmup_started()
@@ -263,6 +291,7 @@ async def _run(runtime: BotRuntime) -> None:
 
         error_callback = build_error_callback(application)
         await updater.start_polling(error_callback=error_callback)
+        polling_started = True
         runtime.health.mark_polling_started()
         module_supervisor.setup_signal_handlers(asyncio.get_running_loop())
 
@@ -303,7 +332,8 @@ async def _run(runtime: BotRuntime) -> None:
         with suppress(asyncio.CancelledError):
             await heartbeat_task
         await module_supervisor.close()
-        await updater.stop()
+        if polling_started:
+            await updater.stop()
         await application.stop()
         await runtime.chain.close()
         await application.shutdown()

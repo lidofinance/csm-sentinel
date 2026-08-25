@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from sentinel.config import Config
+from sentinel.app.storage import RuntimeIdentity
 
 if TYPE_CHECKING:
     from sentinel.app.application import SentinelApplication
@@ -26,6 +27,7 @@ class BotRuntime:
     health: "HealthState"
     health_server: "HealthServer"
     heartbeat_task: Task[None]
+    runtime_identity: RuntimeIdentity
 
     @property
     def config(self) -> Config:
