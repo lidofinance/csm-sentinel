@@ -1,9 +1,15 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+import logging
 
 from sentinel.models import Event, EventNotification
+from sentinel.modules.distribution import (
+    DISTRIBUTION_REPORT_EVENTS,
+)
 from sentinel.modules.formatting import read_field
+
+logger = logging.getLogger(__name__)
 
 OPERATOR_GROUP_CREATED = "OperatorGroupCreated"
 OPERATOR_GROUP_UPDATED = "OperatorGroupUpdated"
@@ -23,6 +29,10 @@ class AggregationGroup:
 
 
 class AggregationGroups:
+    DISTRIBUTION_REPORTS = AggregationGroup(
+        name="distribution_reports",
+        window_blocks=1,
+    )
     TOTAL_SIGNING_KEY_COUNTS = AggregationGroup(
         name="total_signing_key_counts",
         window_blocks=1,
@@ -118,6 +128,57 @@ class NodeOperatorEventAggregator(EventAggregator):
             EventNotification(source_events=tuple(operator_events))
             for _, operator_events in sorted(events_by_key.items())
         ]
+
+
+@dataclass(frozen=True, slots=True)
+class DistributionReportAggregator(EventAggregator):
+    group: AggregationGroup = AggregationGroups.DISTRIBUTION_REPORTS
+    event_names: frozenset[str] = DISTRIBUTION_REPORT_EVENTS
+
+    def aggregation_key(self, event: Event) -> AggregationKey:
+        return AggregationKey.global_key()
+
+    def window_for(self, event: Event) -> AggregationWindow:
+        return AggregationWindow(
+            group=self.group.name,
+            aggregation_key=self.aggregation_key(event),
+            start_block=event.block,
+            end_block=event.block,
+            event_names=self.event_names,
+        )
+
+    def aggregate(self, events: Iterable[Event]) -> list[EventNotification]:
+        source_events = tuple(
+            sorted(
+                (event for event in events if event.event in self.event_names),
+                key=lambda event: (event.block, event.transaction_index, event.log_index),
+            )
+        )
+        received_event_names = {event.event for event in source_events}
+        missing_event_names = self.event_names - received_event_names
+        if missing_event_names:
+            logger.warning(
+                "Incomplete distribution report aggregation",
+                extra={
+                    "block": source_events[0].block,
+                    "received_event_names": sorted(received_event_names),
+                    "missing_event_names": sorted(missing_event_names),
+                },
+            )
+            return []
+
+        transaction_hashes = {event.tx.to_0x_hex() for event in source_events}
+        if len(transaction_hashes) != 1:
+            logger.warning(
+                "Distribution report events span multiple transactions",
+                extra={
+                    "block": source_events[0].block,
+                    "transaction_hashes": sorted(transaction_hashes),
+                },
+            )
+            return []
+
+        return [EventNotification(source_events=source_events)]
 
 
 @dataclass(frozen=True, slots=True)

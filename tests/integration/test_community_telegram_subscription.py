@@ -5,6 +5,7 @@ import os
 import pytest
 
 from sentinel.config import get_config, clear_config
+from sentinel.models import Block
 from sentinel.notifications import (
     BroadcastDelivery,
     NotificationPlan,
@@ -63,6 +64,7 @@ async def _exercise_event(
     anvil_launcher,
     via_subscription: bool = False,
     deposit_digest: bool = False,
+    flush_aggregation: bool = False,
 ) -> None:
     event_block = fork_block
     replay_end_block = event_block
@@ -82,6 +84,14 @@ async def _exercise_event(
                     anvil_http_url=anvil.http_url,
                     tx_hash=tx_hash,
                 )
+                if flush_aggregation:
+                    assert await _wait_for(
+                        lambda: any(
+                            window.event_names <= {event.event for event in window.events}
+                            for window in harness.runtime.storage().aggregation_windows.pending()
+                        )
+                    )
+                    await harness.runtime.handle_block(Block(number=event_block))
                 if deposit_digest:
                     assert await _wait_for(
                         lambda: (
@@ -304,6 +314,7 @@ async def test_process_blocks_distribution_log_updated(anvil_launcher, via_subsc
         ),
         anvil_launcher=anvil_launcher,
         via_subscription=via_subscription,
+        flush_aggregation=True,
     )
 
 

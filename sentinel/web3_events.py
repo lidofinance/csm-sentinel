@@ -18,9 +18,17 @@ class EventBindingSet:
 
 
 def build_event_bindings(module_adapter: BaseModuleAdapter) -> EventBindingSet:
-    event_names = module_adapter.notifiable_events() | module_adapter.side_effect_events()
+    event_sources = module_adapter.event_sources()
+    explicitly_sourced_events = {
+        event_name for source in event_sources for event_name in (source.event_names or ())
+    }
+    event_names = (
+        module_adapter.notifiable_events()
+        | module_adapter.side_effect_events()
+        | explicitly_sourced_events
+    )
     return EventBindingSet(
-        event_sources=module_adapter.event_sources(),
+        event_sources=event_sources,
         abi_by_topics=topics_to_follow(event_names, *module_adapter.topic_abis()),
     )
 

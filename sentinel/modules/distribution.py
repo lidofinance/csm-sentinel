@@ -5,15 +5,24 @@ import aiohttp
 
 from sentinel.app.build_info import application_user_agent
 from sentinel.metrics import DEFAULT_METRICS, HttpMetricsMiddleware
+from sentinel.models import EventNotification
 
 DistributionLogPayload = dict | list
 DistributionLogFetcher = Callable[[str], Awaitable[DistributionLogPayload]]
+DISTRIBUTION_REPORT_EVENTS = frozenset({"ModuleFeeDistributed", "DistributionLogUpdated"})
 
 
 @dataclass(frozen=True, slots=True)
 class DistributionStrikeSummary:
     all_operator_ids: set[str]
     strikes_per_operator: dict[str, list[tuple[str, int]]]
+
+
+def distribution_report_rewards(event: EventNotification) -> int:
+    for source_event in reversed(event.source_events):
+        if source_event.event == "ModuleFeeDistributed":
+            return int(source_event.args["shares"])
+    raise ValueError("DistributionLogUpdated requires ModuleFeeDistributed in its block window")
 
 
 async def default_distribution_log_fetcher(log_cid: str):

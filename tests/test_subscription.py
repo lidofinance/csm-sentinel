@@ -32,6 +32,7 @@ from sentinel.modules.aggregation import (
     AggregationGroups,
     AggregationKey,
     AggregationWindow,
+    DistributionReportAggregator,
     NodeOperatorEventAggregator,
     OperatorGroupChangeAggregator,
 )
@@ -179,6 +180,26 @@ def _make_operator_group_event(
         address="0x0000000000000000000000000000000000000000",
         log_index=log_index,
         transaction_index=0,
+    )
+
+
+def _make_distribution_event(
+    event_name: str,
+    *,
+    block: int = 123,
+    transaction_index: int = 0,
+    log_index: int,
+    distributed: int = 1,
+) -> Event:
+    args = {"shares": distributed} if event_name == "ModuleFeeDistributed" else {"logCid": "cid123"}
+    return Event(
+        event=event_name,
+        args=args,
+        block=block,
+        tx=HexBytes(f"0x{transaction_index + 1:064x}"),
+        address="0x0000000000000000000000000000000000000005",
+        log_index=log_index,
+        transaction_index=transaction_index,
     )
 
 
@@ -848,6 +869,80 @@ async def test_total_signing_key_count_events_are_aggregated_once_per_block():
         "totalKeysCount": 4,
     }
     assert harness.storage.state.block.value == 123
+
+
+@pytest.mark.asyncio
+async def test_distribution_report_events_are_aggregated_in_one_block_window():
+    storage = _FakeSubscriptionStorage({})
+    sink = _FakeNotificationSink()
+    aggregation = AggregationCoordinator(
+        storage=storage,
+        emit_notification=sink.emit,
+        aggregators=(DistributionReportAggregator(),),
+    )
+    first_report = (
+        _make_distribution_event(
+            "ModuleFeeDistributed",
+            transaction_index=4,
+            log_index=10,
+            distributed=0,
+        ),
+        _make_distribution_event(
+            "DistributionLogUpdated",
+            transaction_index=4,
+            log_index=11,
+        ),
+    )
+    for event in reversed(first_report):
+        await aggregation.handle_event(event)
+
+    assert aggregation.pending_window_count == 1
+    (window,) = storage.state.aggregation_windows.pending()
+    assert window.aggregation_key == AggregationKey.global_key()
+    sink.emit.assert_not_awaited()
+
+    await aggregation.handle_block(123)
+
+    notification = sink.emit.await_args.args[0]
+    assert notification.source_events == first_report
+    assert notification.event == "DistributionLogUpdated"
+    assert aggregation.pending_window_count == 0
+
+
+def test_distribution_report_aggregator_warns_about_incomplete_pair(caplog):
+    event = _make_distribution_event(
+        "ModuleFeeDistributed",
+        transaction_index=4,
+        log_index=10,
+    )
+
+    with caplog.at_level("WARNING"):
+        notifications = DistributionReportAggregator().aggregate((event,))
+
+    assert notifications == []
+    assert "Incomplete distribution report aggregation" in caplog.text
+    assert caplog.records[-1].missing_event_names == ["DistributionLogUpdated"]
+
+
+def test_distribution_report_aggregator_warns_about_cross_transaction_pair(caplog):
+    events = (
+        _make_distribution_event(
+            "ModuleFeeDistributed",
+            transaction_index=4,
+            log_index=10,
+        ),
+        _make_distribution_event(
+            "DistributionLogUpdated",
+            transaction_index=7,
+            log_index=11,
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        notifications = DistributionReportAggregator().aggregate(events)
+
+    assert notifications == []
+    assert "Distribution report events span multiple transactions" in caplog.text
 
 
 @pytest.mark.asyncio
