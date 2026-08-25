@@ -9,6 +9,7 @@ from telegram.ext import ApplicationBuilder
 from sentinel.app.application import SentinelApplication
 from sentinel.app.bootstrap import (
     _bind_persistence_runtime,
+    _persist_initial_checkpoint,
     _resolve_backfill_start_block,
     _run,
     _wait_for_subscription_start,
@@ -17,6 +18,7 @@ from sentinel.app.health import HealthState
 from sentinel.app.runtime import BotRuntime
 from sentinel.app.storage import RuntimeIdentity, create_persistence
 from sentinel.module_types import ModuleType
+from sentinel.services.subscription import ModuleRuntimeSupervisor
 
 
 @pytest.mark.parametrize(
@@ -126,6 +128,31 @@ async def test_runtime_identity_mismatch_stops_before_polling_and_cleans_up():
     module_supervisor.close.assert_awaited_once()
     health_server.stop.assert_called_once()
     assert "does not match configured runtime" in (health.snapshot().fatal_error or "")
+
+
+@pytest.mark.asyncio
+async def test_initial_checkpoint_is_available_before_periodic_update(tmp_path):
+    persistence = create_persistence(tmp_path)
+    application = (
+        ApplicationBuilder()
+        .application_class(SentinelApplication)
+        .token("123:TEST")
+        .persistence(persistence)
+        .build()
+    )
+    supervisor = MagicMock(spec=ModuleRuntimeSupervisor)
+
+    async def checkpoint_current_head() -> int:
+        application.bot_data["block"] = 25_600_000
+        return 25_600_000
+
+    supervisor.checkpoint_current_head = AsyncMock(side_effect=checkpoint_current_head)
+
+    live_head = await _persist_initial_checkpoint(application, supervisor)
+
+    restarted_persistence = create_persistence(tmp_path)
+    assert live_head == 25_600_000
+    assert (await restarted_persistence.get_bot_data())["block"] == 25_600_000
 
 
 @pytest.mark.asyncio

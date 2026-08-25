@@ -76,6 +76,20 @@ async def _bind_persistence_runtime(
     )
 
 
+async def _persist_initial_checkpoint(
+    application: SentinelApplication,
+    module_supervisor: ModuleRuntimeSupervisor,
+) -> int:
+    persistence = application.persistence
+    if persistence is None:
+        raise RuntimeError("Persistence is required for the initial chain checkpoint")
+
+    live_head = await module_supervisor.checkpoint_current_head()
+    await application.update_persistence()
+    await persistence.flush()
+    return live_head
+
+
 async def create_runtime() -> BotRuntime:
     secret_bundle = load_environment_files()
     env_cfg = load_config_from_env()
@@ -299,18 +313,19 @@ async def _run(runtime: BotRuntime) -> None:
         # This avoids missing blocks mined while historical catch-up is running.
         module_supervisor_task = asyncio.create_task(module_supervisor.subscribe())
         await _wait_for_subscription_start(module_supervisor, module_supervisor_task)
-        runtime.health.mark_startup_complete()
 
-        if block_from != 0:
-            runtime.health.mark_catchup_started()
-            await module_supervisor.catch_up_from(block_from)
-            runtime.health.mark_catchup_complete()
-        else:
-            live_head = await module_supervisor.checkpoint_current_head()
+        if block_from == 0:
+            live_head = await _persist_initial_checkpoint(application, module_supervisor)
             logger.info(
                 "Historical backfill skipped. Starting from live head: %s",
                 live_head,
             )
+
+        runtime.health.mark_startup_complete()
+        if block_from != 0:
+            runtime.health.mark_catchup_started()
+            await module_supervisor.catch_up_from(block_from)
+            runtime.health.mark_catchup_complete()
 
         await job_context.schedule(application)
 
