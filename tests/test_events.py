@@ -53,6 +53,21 @@ def _notification(event):
     return EventNotification.from_event(event)
 
 
+def _distribution_notification(event, distributed: int = 1):
+    from sentinel.models import Event, EventNotification
+
+    distributed_event = Event(
+        event="ModuleFeeDistributed",
+        args={"shares": distributed},
+        block=event.block,
+        tx=event.tx,
+        address=event.address,
+        log_index=event.log_index - 1,
+        transaction_index=event.transaction_index,
+    )
+    return EventNotification(source_events=(distributed_event, event))
+
+
 class _DummyConnectProvider:
     w3 = SimpleNamespace(to_hex=lambda value: "0x" + value.hex())
 
@@ -777,12 +792,12 @@ async def test_distribution_log_updated_produces_strike_notifications():
         block=123,
         tx=HexBytes("0xdeadbeef"),
         address="0x0000000000000000000000000000000000000000",
-        log_index=0,
+        log_index=2,
         transaction_index=0,
     )
 
     plan = await CommunityEventMessages.distribution_log_updated(
-        event_messages, _notification(event)
+        event_messages, _distribution_notification(event)
     )
 
     assert isinstance(plan, NotificationPlan)
@@ -826,12 +841,12 @@ async def test_distribution_log_updated_handles_empty_payload():
         block=123,
         tx=HexBytes("0xdeadbeef"),
         address="0x0000000000000000000000000000000000000000",
-        log_index=0,
+        log_index=2,
         transaction_index=0,
     )
 
     plan = await CommunityEventMessages.distribution_log_updated(
-        event_messages, _notification(event)
+        event_messages, _distribution_notification(event)
     )
 
     assert isinstance(plan, NotificationPlan)
@@ -839,6 +854,46 @@ async def test_distribution_log_updated_handles_empty_payload():
     expected_base = texts.distribution_data_updated()
     expected_foot = await event_messages.event_footer(event)
     assert _broadcast(plan) == f"{expected_base}{expected_foot}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("module_name", ["community", "curated"])
+async def test_distribution_log_updated_skips_zero_distributed_rewards(module_name):
+    from sentinel.models import Event
+    from sentinel.modules.community.events import CommunityEventMessages
+    from sentinel.modules.curated.events import CuratedEventMessages
+
+    _set_event_config()
+    adapter = _FakeCuratedAdapter(
+        contracts=SimpleNamespace(
+            module=object(),
+            accounting=object(),
+            parameters_registry=object(),
+            meta_registry=_FakeMetaRegistry(),
+        ),
+        notifiable_events={"DistributionLogUpdated"},
+    )
+    fetcher = _FakeFetcher(result={})
+    event_messages_class = (
+        CommunityEventMessages if module_name == "community" else CuratedEventMessages
+    )
+    event_messages = event_messages_class(adapter, distribution_log_fetcher=fetcher)
+    event = Event(
+        event="DistributionLogUpdated",
+        args={"logCid": "cid123"},
+        block=123,
+        tx=HexBytes("0xdeadbeef"),
+        address="0x0000000000000000000000000000000000000000",
+        log_index=4,
+        transaction_index=4,
+    )
+
+    plan = await event_messages.get_notification_plan(
+        _distribution_notification(event, distributed=0)
+    )
+
+    assert plan is None
+    assert fetcher.calls == []
 
 
 @pytest.mark.asyncio
@@ -876,11 +931,11 @@ async def test_curated_distribution_log_updated_enriches_strike_operator_name():
         block=123,
         tx=HexBytes("0xdeadbeef"),
         address="0x0000000000000000000000000000000000000000",
-        log_index=0,
+        log_index=2,
         transaction_index=0,
     )
 
-    plan = await event_messages.get_notification_plan(_notification(event))
+    plan = await event_messages.get_notification_plan(_distribution_notification(event))
 
     assert isinstance(plan, NotificationPlan)
     expected_base = texts.distribution_data_updated()
@@ -1730,6 +1785,8 @@ def test_subscription_uses_v3_event_bindings_only():
         assert "WithdrawalSubmitted" not in decoded_event_names
         assert "GeneralDelayedPenaltyReported" in decoded_event_names
         assert "ValidatorSlashingReported" in decoded_event_names
+        assert "ModuleFeeDistributed" in decoded_event_names
+        assert "DistributionLogUpdated" in decoded_event_names
         assert "KeyAllocatedBalanceChanged" not in decoded_event_names
     finally:
         clear_config()

@@ -14,6 +14,7 @@ from sentinel.chain import SharedChainConnection
 from sentinel.module_types import ModuleType
 from sentinel.modules.base import BaseModuleAdapter, EventSource, NodeOperatorOption
 from sentinel.modules.curated.texts import CuratedTexts
+from sentinel.modules.distribution import DISTRIBUTION_REPORT_EVENTS
 from sentinel.modules.formatting import read_field
 
 logger = logging.getLogger(__name__)
@@ -89,7 +90,7 @@ CURATED_EVENTS = frozenset(
     }
 )
 
-CURATED_FEE_DISTRIBUTOR_EVENTS = frozenset({"DistributionLogUpdated"})
+CURATED_FEE_DISTRIBUTOR_EVENTS = DISTRIBUTION_REPORT_EVENTS
 CURATED_VEBO_EVENTS = frozenset({"ValidatorExitRequest"})
 CURATED_SIDE_EFFECT_EVENTS = frozenset({"NodeOperatorAdded", "OperatorMetadataSet"})
 CURATED_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS = frozenset(
@@ -301,6 +302,7 @@ class CuratedModuleAdapter(BaseModuleAdapter):
 
     def event_aggregators(self):
         from sentinel.modules.aggregation import (
+            DistributionReportAggregator,
             OperatorGroupChangeAggregator,
             node_operator_aggregators_from_event_handlers,
         )
@@ -308,5 +310,6 @@ class CuratedModuleAdapter(BaseModuleAdapter):
 
         return (
             *node_operator_aggregators_from_event_handlers(CURATED_EVENTS_TO_FOLLOW),
+            DistributionReportAggregator(),
             OperatorGroupChangeAggregator(),
         )

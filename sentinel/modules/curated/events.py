@@ -23,8 +23,6 @@ from sentinel.modules.curated.texts import (
 from sentinel.modules.distribution import (
     DistributionLogFetcher,
     default_distribution_log_fetcher,
-    parse_distribution_log,
-    validator_sort_key,
 )
 from sentinel.services.digest import DigestGroups
 from sentinel.modules.formatting import read_field
@@ -174,6 +172,9 @@ class CuratedEventMessages(BaseModule):
         if not metadata.name:
             return f"#{node_operator_id}"
         return f"#{node_operator_id} - {metadata.name}"
+
+    async def _distribution_operator_label(self, operator_id: str, block: int) -> str:
+        return await self._node_operator_label(int(operator_id), block)
 
     async def _digest_operator_label(self, node_operator_id: int, block: int) -> str:
         return await self._node_operator_label(node_operator_id, block)
@@ -498,54 +499,6 @@ class CuratedEventMessages(BaseModule):
     async def operator_metadata_set(self, event: EventNotification):
         template = self._require_message_template(event.event)
         return template(event.args["metadata"]) + await self.notification_footer(event)
-
-    async def distribution_log_updated(self, event: EventNotification):
-        template = self._require_message_template(event.event)
-        base_message = template()
-        footer = await self.notification_footer(event)
-        fallback_message = f"{base_message}{footer}"
-
-        log_cid = event.args.get("logCid")
-        try:
-            distribution_log = await self._fetch_distribution_log(log_cid)
-        except Exception as exc:
-            logger.warning(
-                "Failed to enrich DistributionLogUpdated for logCid %s: %s",
-                log_cid,
-                exc,
-            )
-            return NotificationPlan.broadcast(fallback_message)
-
-        summary = parse_distribution_log(distribution_log)
-
-        operator_messages: dict[str, str] = {}
-        for operator_id, flagged in summary.strikes_per_operator.items():
-            flagged_sorted = sorted(flagged, key=lambda item: validator_sort_key(item[0]))
-            node_operator_label = await self._node_operator_label(int(operator_id), event.block)
-            operator_messages[str(operator_id)] = (
-                f"{template(node_operator_label, flagged_sorted)}{footer}"
-            )
-
-        if not operator_messages:
-            if summary.all_operator_ids:
-                return NotificationPlan.broadcast_to_operators(
-                    fallback_message,
-                    summary.all_operator_ids,
-                )
-            return NotificationPlan.broadcast(fallback_message)
-
-        def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
-            messages = tuple(
-                operator_messages[node_operator_id]
-                for node_operator_id in sorted(
-                    node_operator_ids,
-                    key=lambda value: int(value),
-                )
-                if node_operator_id in operator_messages
-            )
-            return messages or (fallback_message,)
-
-        return NotificationPlan.per_chat(summary.all_operator_ids, render)
 
     async def _node_operator_ids_for_bond_curve(self, curve_id: int, block: int) -> set[int]:
         operators_count = await self.module.functions.getNodeOperatorsCount().call(

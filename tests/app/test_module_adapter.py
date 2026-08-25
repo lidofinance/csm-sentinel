@@ -24,6 +24,7 @@ from sentinel.modules.curated.adapter import (
     CuratedModuleContracts,
 )
 from sentinel.modules.curated.texts import CuratedTexts
+from sentinel.modules.distribution import DISTRIBUTION_REPORT_EVENTS
 
 
 class _FakeEth:
@@ -143,6 +144,10 @@ def test_community_module_adapter_instantiation():
     )
     assert result.module_type == ModuleType.COMMUNITY
     assert result.side_effect_events() == {"NodeOperatorAdded"}
+    fee_distributor_source = next(
+        source for source in result.event_sources() if source.name == "fee_distributor"
+    )
+    assert fee_distributor_source.event_names == DISTRIBUTION_REPORT_EVENTS
 
 
 def test_curated_module_adapter_instantiation():
@@ -176,6 +181,10 @@ def test_curated_module_adapter_instantiation():
     assert "KeyAllocatedBalanceChanged" not in result.notifiable_events()
     assert result.catalog_events() == result.notifiable_events()
     assert result.side_effect_events() == {"NodeOperatorAdded", "OperatorMetadataSet"}
+    fee_distributor_source = next(
+        source for source in result.event_sources() if source.name == "fee_distributor"
+    )
+    assert fee_distributor_source.event_names == DISTRIBUTION_REPORT_EVENTS
 
 
 def test_build_curated_module_adapter_uses_curated_module_abi():
