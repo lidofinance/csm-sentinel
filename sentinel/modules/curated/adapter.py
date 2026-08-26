@@ -302,7 +302,11 @@ class CuratedModuleAdapter(BaseModuleAdapter):
 
     def event_aggregators(self):
         from sentinel.modules.aggregation import (
+            BOND_CURVE_WEIGHT_SET,
             DistributionReportAggregator,
+            GlobalEventAggregator,
+            NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGED,
+            AggregationGroups,
             OperatorGroupChangeAggregator,
             node_operator_aggregators_from_event_handlers,
         )
@@ -312,4 +316,12 @@ class CuratedModuleAdapter(BaseModuleAdapter):
             *node_operator_aggregators_from_event_handlers(CURATED_EVENTS_TO_FOLLOW),
             DistributionReportAggregator(),
             OperatorGroupChangeAggregator(),
+            GlobalEventAggregator(
+                group=AggregationGroups.NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGES,
+                event_names=frozenset({NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGED}),
+            ),
+            GlobalEventAggregator(
+                group=AggregationGroups.BOND_CURVE_WEIGHT_CHANGES,
+                event_names=frozenset({BOND_CURVE_WEIGHT_SET}),
+            ),
         )

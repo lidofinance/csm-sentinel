@@ -336,21 +336,31 @@ def test_curated_burn_and_lock_templates_render_eth_asset_amounts():
 
 
 def test_curated_operator_group_templates_render_compact_group_label():
+    from sentinel.modules.curated.operator_groups import OperatorAllocation, OperatorGroupChange
     from sentinel.modules.curated.texts import (
         operator_group_cleared,
         operator_group_created,
         operator_group_updated,
     )
 
-    sub_node_operators = [
-        {
-            "label": "#10 - Operator Ten",
-            "share": 10000,
-            "weightedShare": 10000,
-        }
+    allocations = [
+        OperatorAllocation(
+            node_operator_id=10,
+            share=10000,
+            effective_weight=1,
+            weighted_share=10000,
+        )
     ]
 
-    created = operator_group_created(7, sub_node_operators, group_name="New Group")
+    with pytest.raises(ValueError, match="requires an old or new allocation"):
+        OperatorGroupChange(node_operator_id=10, node_operator_label="#10 - Operator Ten")
+
+    created = operator_group_created(
+        7,
+        allocations,
+        {10: "#10 - Operator Ten"},
+        group_name="New Group",
+    )
     assert "Group: `7: New Group`" in created
     assert "Group id:" not in created
     assert "Group name:" not in created
@@ -362,7 +372,7 @@ def test_curated_operator_group_templates_render_compact_group_label():
 
     renamed_from_empty = operator_group_updated(
         7,
-        change_kind="renamed",
+        [],
         old_group_name=None,
         new_group_name="New Group",
     )
@@ -373,7 +383,7 @@ def test_curated_operator_group_templates_render_compact_group_label():
 
     renamed_to_empty = operator_group_updated(
         7,
-        change_kind="renamed",
+        [],
         old_group_name="Old Group",
         new_group_name=None,
     )
@@ -382,7 +392,7 @@ def test_curated_operator_group_templates_render_compact_group_label():
 
     renamed = operator_group_updated(
         7,
-        change_kind="renamed",
+        [],
         old_group_name="Old Group",
         new_group_name="New Group",
     )
@@ -1353,23 +1363,26 @@ async def test_curated_operator_group_updated_targets_only_changed_sub_node_oper
     assert isinstance(plan, NotificationPlan)
     assert meta_registry.group_ids == [7]
     assert meta_registry.call.calls == [{"block_identifier": 122}]
-    operator_messages = _operator_messages(plan)
-    assert set(operator_messages) == {"10", "11", "12"}
-    assert "Changes:" in operator_messages["10"]
-    assert "Updated \\#10 \\- Operator Ten" in operator_messages["10"]
-    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in operator_messages["10"]
-    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in operator_messages["10"]
-    assert "Effective weight" not in operator_messages["10"]
-    assert "Node Operator:" not in operator_messages["10"]
-    assert "Removed \\#11 \\- Operator Eleven" in operator_messages["11"]
-    assert "Previous Share: `0\\.01%`" in operator_messages["11"]
-    assert "Previous Effective allocation share: `50%`" in operator_messages["11"]
-    assert "Node Operator:" not in operator_messages["11"]
-    assert "Added \\#12 \\- Operator Twelve" in operator_messages["12"]
-    assert "Share: `0\\.02%`" in operator_messages["12"]
-    assert "Effective allocation share: `66\\.66%`" in operator_messages["12"]
-    assert "Effective weight" not in operator_messages["12"]
-    assert "Node Operator:" not in operator_messages["12"]
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"10", "11", "12"}
+    (combined_message,) = delivery.render(frozenset({"10", "11", "12"}))
+    assert "Changes:" in combined_message
+    assert "Updated \\#10 \\- Operator Ten" in combined_message
+    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in combined_message
+    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in combined_message
+    assert "Removed \\#11 \\- Operator Eleven" in combined_message
+    assert "Previous Share: `0\\.01%`" in combined_message
+    assert "Previous Effective allocation share: `50%`" in combined_message
+    assert "Added \\#12 \\- Operator Twelve" in combined_message
+    assert "Share: `0\\.02%`" in combined_message
+    assert "Effective allocation share: `66\\.66%`" in combined_message
+    assert "Effective weight" not in combined_message
+    assert "Node Operator:" not in combined_message
+
+    (operator_message,) = delivery.render(frozenset({"10"}))
+    assert "Operator Ten" in operator_message
+    assert "Operator Eleven" not in operator_message
+    assert "Operator Twelve" not in operator_message
     assert meta_registry.operator_weight_ids == [[10, 11], [10, 12]]
     assert [call.calls for call in meta_registry.operator_weight_calls] == [
         [{"block_identifier": 122}],
@@ -1420,15 +1433,6 @@ async def test_curated_operator_group_batch_renders_net_diff_for_clear_and_creat
             transaction_index=0,
         ),
         Event(
-            event="NodeOperatorEffectiveWeightChanged",
-            args={"nodeOperatorId": 10, "oldWeight": 1, "newWeight": 2},
-            block=123,
-            tx=HexBytes("0xdeadbeef"),
-            address="0x0000000000000000000000000000000000000000",
-            log_index=2,
-            transaction_index=0,
-        ),
-        Event(
             event="OperatorGroupCreated",
             args={
                 "groupId": 7,
@@ -1460,18 +1464,19 @@ async def test_curated_operator_group_batch_renders_net_diff_for_clear_and_creat
     plan = await event_messages.get_notification_plan(notifications[0])
 
     assert isinstance(plan, NotificationPlan)
-    operator_messages = _operator_messages(plan)
-    assert set(operator_messages) == {"10", "11", "12"}
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["10"]
-    assert "Updated \\#10 \\- Operator Ten" in operator_messages["10"]
-    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in operator_messages["10"]
-    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in operator_messages["10"]
-    assert "Removed \\#11 \\- Operator Eleven" in operator_messages["11"]
-    assert "Previous Effective allocation share: `50%`" in operator_messages["11"]
-    assert "Added \\#12 \\- Operator Twelve" in operator_messages["12"]
-    assert "Share: `0\\.02%`" in operator_messages["12"]
-    assert "Effective allocation share: `66\\.66%`" in operator_messages["12"]
-    assert "Operator effective weight changed" not in "".join(operator_messages.values())
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"10", "11", "12"}
+    (message,) = delivery.render(frozenset({"10", "11", "12"}))
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in message
+    assert "Updated \\#10 \\- Operator Ten" in message
+    assert "Share: `0\\.04% \\-\\> 0\\.05%`" in message
+    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in message
+    assert "Removed \\#11 \\- Operator Eleven" in message
+    assert "Previous Effective allocation share: `50%`" in message
+    assert "Added \\#12 \\- Operator Twelve" in message
+    assert "Share: `0\\.02%`" in message
+    assert "Effective allocation share: `66\\.66%`" in message
+    assert "Effective weight" not in message
 
 
 @pytest.mark.asyncio
@@ -1490,7 +1495,10 @@ async def test_curated_operator_group_updated_notifies_group_name_change():
             ],
         },
         metadata_names={10: "Operator Ten", 11: "Operator Eleven"},
-        operator_weights_by_block={123: {10: 1, 11: 4}},
+        operator_weights_by_block={
+            122: {10: 1, 11: 4},
+            123: {10: 1, 11: 4},
+        },
     )
     adapter = _FakeCuratedAdapter(
         contracts=SimpleNamespace(
@@ -1526,14 +1534,189 @@ async def test_curated_operator_group_updated_notifies_group_name_change():
     assert isinstance(plan, NotificationPlan)
     assert meta_registry.group_ids == [7]
     assert meta_registry.call.calls == [{"block_identifier": 122}]
-    assert _broadcast_operator_ids(plan) == {"10", "11"}
-    message = _broadcast(plan)
-    assert message is not None
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"10", "11"}
+    (message,) = delivery.render(frozenset({"10", "11"}))
     assert "Operator group updated" in message
     assert "Group: `7`" in message
     assert "Group renamed: `Old Group` \\-\\> `New Group`" in message
     assert "Node Operator:" not in message
-    assert meta_registry.operator_weight_ids == []
+    assert meta_registry.operator_weight_ids == [[10, 11], [10, 11]]
+    assert meta_registry.metadata_ids == []
+
+
+@pytest.mark.asyncio
+async def test_curated_effective_weight_changes_render_one_summary_per_chat():
+    from sentinel.models import Event, EventNotification
+    from sentinel.modules.curated.events import CuratedEventMessages
+    from sentinel.notifications import NotificationPlan
+
+    _set_event_config()
+    meta_registry = _FakeMetaRegistry(metadata_names={10: "Operator Ten", 11: "Operator Eleven"})
+    adapter = _FakeCuratedAdapter(
+        contracts=SimpleNamespace(
+            module=object(),
+            accounting=object(),
+            parameters_registry=object(),
+            meta_registry=meta_registry,
+        ),
+        notifiable_events={"NodeOperatorEffectiveWeightChanged"},
+    )
+    event_messages = CuratedEventMessages(adapter, distribution_log_fetcher=_FakeFetcher(result={}))
+    events = (
+        Event(
+            event="NodeOperatorEffectiveWeightChanged",
+            args={"nodeOperatorId": 10, "oldWeight": 100, "newWeight": 50},
+            block=123,
+            tx=HexBytes("0x01"),
+            address="0x0000000000000000000000000000000000000000",
+            log_index=1,
+            transaction_index=0,
+        ),
+        Event(
+            event="NodeOperatorEffectiveWeightChanged",
+            args={"nodeOperatorId": 10, "oldWeight": 50, "newWeight": 0},
+            block=123,
+            tx=HexBytes("0x02"),
+            address="0x0000000000000000000000000000000000000000",
+            log_index=1,
+            transaction_index=1,
+        ),
+        Event(
+            event="NodeOperatorEffectiveWeightChanged",
+            args={"nodeOperatorId": 11, "oldWeight": 10, "newWeight": 20},
+            block=123,
+            tx=HexBytes("0x03"),
+            address="0x0000000000000000000000000000000000000000",
+            log_index=1,
+            transaction_index=2,
+        ),
+    )
+
+    plan = await event_messages.get_notification_plan(EventNotification(source_events=events))
+
+    assert isinstance(plan, NotificationPlan)
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"10", "11"}
+    (combined_message,) = delivery.render(frozenset({"10", "11"}))
+    assert r"\#10 \- Operator Ten: `100 \-\> 0`" in combined_message
+    assert r"\#11 \- Operator Eleven: `10 \-\> 20`" in combined_message
+    assert "Block: [123](https://etherscan.io/block/123)" in combined_message
+    (operator_message,) = delivery.render(frozenset({"10"}))
+    assert "Operator Ten" in operator_message
+    assert "Operator Eleven" not in operator_message
+
+
+@pytest.mark.asyncio
+async def test_curated_group_rename_and_weight_change_notify_independently():
+    from sentinel.models import Event
+    from sentinel.modules.aggregation import OperatorGroupChangeAggregator
+    from sentinel.modules.curated.events import CuratedEventMessages
+    from sentinel.notifications import NotificationPlan
+
+    _set_event_config()
+    previous_group = {
+        "name": "Old Group",
+        "subNodeOperators": [
+            {"nodeOperatorId": 10, "share": 4},
+            {"nodeOperatorId": 11, "share": 1},
+        ],
+    }
+    current_group = previous_group | {"name": "New Group"}
+    meta_registry = _FakeMetaRegistry(
+        previous_group,
+        metadata_names={10: "Operator Ten", 11: "Operator Eleven"},
+        operator_weights_by_block={
+            122: {10: 100, 11: 100},
+            123: {10: 0, 11: 100},
+        },
+    )
+    adapter = _FakeCuratedAdapter(
+        contracts=SimpleNamespace(
+            module=object(),
+            accounting=object(),
+            parameters_registry=object(),
+            meta_registry=meta_registry,
+        ),
+        notifiable_events={
+            "NodeOperatorEffectiveWeightChanged",
+            "OperatorGroupUpdated",
+        },
+    )
+    event_messages = CuratedEventMessages(adapter, distribution_log_fetcher=_FakeFetcher(result={}))
+    weight_event = Event(
+        event="NodeOperatorEffectiveWeightChanged",
+        args={"nodeOperatorId": 10, "oldWeight": 50, "newWeight": 0},
+        block=123,
+        tx=HexBytes("0x02"),
+        address="0x0000000000000000000000000000000000000000",
+        log_index=1,
+        transaction_index=1,
+    )
+    group_event = Event(
+        event="OperatorGroupUpdated",
+        args={"groupId": 7, "groupInfo": current_group},
+        block=123,
+        tx=HexBytes("0x03"),
+        address="0x0000000000000000000000000000000000000000",
+        log_index=1,
+        transaction_index=2,
+    )
+    notifications = OperatorGroupChangeAggregator().aggregate([weight_event, group_event])
+
+    assert len(notifications) == 1
+    assert notifications[0].source_events == (group_event,)
+    group_plan = await event_messages.get_notification_plan(notifications[0])
+
+    assert isinstance(group_plan, NotificationPlan)
+    group_delivery = _per_chat(group_plan)
+    assert group_delivery.operator_ids == {"10", "11"}
+    (group_message,) = group_delivery.render(frozenset({"10", "11"}))
+    assert r"Group renamed: `Old Group` \-\> `New Group`" in group_message
+    assert "Effective weight" not in group_message
+
+    weight_plan = await event_messages.get_notification_plan(_notification(weight_event))
+
+    assert isinstance(weight_plan, NotificationPlan)
+    weight_delivery = _per_chat(weight_plan)
+    assert weight_delivery.operator_ids == {"10"}
+    (weight_message,) = weight_delivery.render(frozenset({"10"}))
+    assert r"\#10 \- Operator Ten: `50 \-\> 0`" in weight_message
+    assert "will no longer receive deposit allocation" in weight_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_curated_empty_operator_group_rename_has_no_delivery_plan():
+    from sentinel.models import Event
+    from sentinel.modules.curated.events import CuratedEventMessages
+
+    _set_event_config()
+    previous_group = {"name": "Old Group", "subNodeOperators": []}
+    meta_registry = _FakeMetaRegistry(previous_group)
+    adapter = _FakeCuratedAdapter(
+        contracts=SimpleNamespace(
+            module=object(),
+            accounting=object(),
+            parameters_registry=object(),
+            meta_registry=meta_registry,
+        ),
+        notifiable_events={"OperatorGroupUpdated"},
+    )
+    event_messages = CuratedEventMessages(adapter, distribution_log_fetcher=_FakeFetcher(result={}))
+    event = Event(
+        event="OperatorGroupUpdated",
+        args={
+            "groupId": 7,
+            "groupInfo": {"name": "New Group", "subNodeOperators": []},
+        },
+        block=123,
+        tx=HexBytes("0xdeadbeef"),
+        address="0x0000000000000000000000000000000000000000",
+        log_index=0,
+        transaction_index=0,
+    )
+
+    assert await event_messages.get_notification_plan(_notification(event)) is None
 
 
 @pytest.mark.asyncio
@@ -1594,17 +1777,18 @@ async def test_curated_operator_group_updated_notifies_unchanged_operators_on_gr
     plan = await event_messages.get_notification_plan(_notification(event))
 
     assert isinstance(plan, NotificationPlan)
-    operator_messages = _operator_messages(plan)
-    assert set(operator_messages) == {"10", "11", "12"}
-    assert "Group: `7`" in operator_messages["10"]
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["10"]
-    assert "Node Operator:" not in operator_messages["10"]
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["11"]
-    assert "Node Operator:" not in operator_messages["11"]
-    assert "Added \\#12 \\- Operator Twelve" in operator_messages["12"]
-    assert "Operator Twelve" in operator_messages["12"]
-    assert "Group: `7`" in operator_messages["12"]
-    assert "Group renamed: `Old Group` \\-\\> `New Group`" in operator_messages["12"]
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"10", "11", "12"}
+    (unchanged_operators_message,) = delivery.render(frozenset({"10", "11"}))
+    assert "Group: `7`" in unchanged_operators_message
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in unchanged_operators_message
+    assert "Operator Twelve" not in unchanged_operators_message
+    assert "Node Operator:" not in unchanged_operators_message
+
+    (added_operator_message,) = delivery.render(frozenset({"12"}))
+    assert "Added \\#12 \\- Operator Twelve" in added_operator_message
+    assert "Group: `7`" in added_operator_message
+    assert "Group renamed: `Old Group` \\-\\> `New Group`" in added_operator_message
 
 
 @pytest.mark.asyncio
@@ -1704,13 +1888,18 @@ async def test_curated_bond_curve_weight_set_targets_mapped_node_operators():
     assert isinstance(plan, NotificationPlan)
     assert module.operators_count_call.calls == [{"block_identifier": 123}]
     assert accounting.curve_id_calls == [0, 1, 2]
-    operator_messages = _operator_messages(plan)
-    assert set(operator_messages) == {"0", "2"}
-    assert "Operator type weight changed" in operator_messages["0"]
-    assert "Type id: `1`" in operator_messages["0"]
-    assert "New weight: `50000`" in operator_messages["0"]
-    assert "Node Operator: \\#0 \\- Operator Zero" in operator_messages["0"]
-    assert "Node Operator: \\#2 \\- Operator Two" in operator_messages["2"]
+    delivery = _per_chat(plan)
+    assert delivery.operator_ids == {"0", "2"}
+    (combined_message,) = delivery.render(frozenset({"0", "2"}))
+    assert "Operator type weights changed" in combined_message
+    assert "Type id: `1`" in combined_message
+    assert "New weight: `50000`" in combined_message
+    assert "Operator Zero" in combined_message
+    assert "Operator Two" in combined_message
+    assert "Block: [123](https://etherscan.io/block/123)" in combined_message
+    (operator_message,) = delivery.render(frozenset({"0"}))
+    assert "Operator Zero" in operator_message
+    assert "Operator Two" not in operator_message
 
 
 @pytest.mark.asyncio
