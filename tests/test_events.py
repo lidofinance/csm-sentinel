@@ -268,7 +268,6 @@ class _FakeCuratedAdapter:
         )
         self._notifiable_events = notifiable_events or set()
         self.remembered_labels: list[tuple[int, str | None]] = []
-        self.staking_module_id_refreshes = 0
 
     def catalog_events(self):
         return self._notifiable_events
@@ -278,9 +277,6 @@ class _FakeCuratedAdapter:
 
     def remember_node_operator_label(self, operator_id: int, name: str | None) -> None:
         self.remembered_labels.append((operator_id, name))
-
-    async def refresh_staking_module_id(self) -> None:
-        self.staking_module_id_refreshes += 1
 
 
 def _set_event_config():
@@ -1125,7 +1121,6 @@ async def test_curated_resumed_builds_temporary_release_broadcast():
 
     plan = await event_messages.get_notification_plan(_notification(event))
 
-    assert adapter.staking_module_id_refreshes == 1
     assert isinstance(plan, NotificationPlan)
     assert _broadcast_operator_ids(plan) is None
     message = _broadcast(plan)
