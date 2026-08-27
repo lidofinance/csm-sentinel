@@ -3,7 +3,7 @@ import logging
 from contextlib import suppress
 from typing import Any, Protocol, cast
 
-from web3 import AsyncWeb3, WebSocketProvider
+from web3 import AsyncWeb3
 from web3.utils.subscriptions import (
     LogsSubscription,
     LogsSubscriptionContext,
@@ -355,35 +355,3 @@ class Subscription:
                     await self._emit_event(item)
                 else:
                     await self._emit_block(item)
-
-
-class LoggingConsumer:
-    async def handle_event(self, event: Event):
-        logger.warning("Event %s emitted with data: %s", event.event, event.args)
-
-    async def handle_block(self, block: Block):
-        logger.warning("Current block number: %s", block.number)
-
-
-if __name__ == "__main__":
-    from sentinel.app.module_adapter import build_module_adapter_from_config
-    from sentinel.chain import SharedChainConnection
-
-    cfg = get_config()
-    provider = AsyncWeb3(WebSocketProvider(cfg.web3_socket_providers[0]))
-    module_adapter = build_module_adapter_from_config(
-        cfg,
-        provider,
-        SharedChainConnection(provider),
-    )
-
-    subscription = Subscription(
-        provider,
-        health=HealthState(),
-        module_adapter=module_adapter,
-    )
-    logging_consumer = LoggingConsumer()
-    subscription.add_event_consumer(logging_consumer)
-    subscription.add_block_consumer(logging_consumer)
-
-    asyncio.run(subscription.subscribe())
