@@ -99,7 +99,7 @@ def build_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(broadcast_menu, pattern="^" + Callback.BACK.value + "$"),
                 CallbackQueryHandler(
                     broadcast_all_confirm,
-                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_ALL.value + "$",
+                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_ALL.value + r":\d+$",
                 ),
                 MessageHandler(text_without_commands, broadcast_all_message),
             ],
@@ -111,7 +111,7 @@ def build_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(broadcast_by_no, pattern="^" + Callback.BACK.value + "$"),
                 CallbackQueryHandler(
                     broadcast_selected_confirm,
-                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_SELECTED.value + "$",
+                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_SELECTED.value + r":\d+$",
                 ),
                 MessageHandler(text_without_commands, broadcast_selected_message),
             ],
