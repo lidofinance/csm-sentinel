@@ -79,10 +79,10 @@ def _sub_node_operator_ids(group_info) -> set[int]:
     }
 
 
-def _weight_share_basis_points(share: int, weight: int, total_weighted_share: int) -> int:
-    if total_weighted_share <= 0:
+def _weight_basis_points(weight: int, total_weight: int) -> int:
+    if total_weight <= 0:
         return 0
-    return share * weight * 10_000 // total_weighted_share
+    return weight * 10_000 // total_weight
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,23 +186,14 @@ class CuratedEventMessages(BaseModule):
             int(read_field(operator, "nodeOperatorId", 0)) for operator in sub_node_operators
         ]
         weights = await self._fetch_node_operator_weights(tuple(node_operator_ids), block)
-        total_weighted_share = sum(
-            int(read_field(operator, "share", 1)) * weights[node_operator_id]
-            for operator, node_operator_id in zip(
-                sub_node_operators, node_operator_ids, strict=True
-            )
-        )
+        total_weight = sum(weights.values())
 
         return [
             OperatorAllocation(
                 node_operator_id=node_operator_id,
                 share=int(read_field(operator, "share", 1)),
                 effective_weight=weights[node_operator_id],
-                weighted_share=_weight_share_basis_points(
-                    int(read_field(operator, "share", 1)),
-                    weights[node_operator_id],
-                    total_weighted_share,
-                ),
+                weighted_share=_weight_basis_points(weights[node_operator_id], total_weight),
             )
             for operator, node_operator_id in zip(
                 sub_node_operators, node_operator_ids, strict=True

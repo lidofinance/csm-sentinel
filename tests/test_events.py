@@ -1288,10 +1288,10 @@ async def test_curated_operator_group_created_targets_all_added_sub_node_operato
     assert "Group: `7: Test Group`" in message
     assert "Added Node Operators" in message
     assert "Operator Ten" in message
-    assert "Weighted share: 50% \\(group share: 0\\.04%\\)" in message
+    assert "Weighted share: 20% \\(group share: 0\\.04%\\)" in message
     assert "Effective weight" not in message
     assert "Operator Eleven" in message
-    assert "Weighted share: 50% \\(group share: 0\\.01%\\)" in message
+    assert "Weighted share: 80% \\(group share: 0\\.01%\\)" in message
     assert meta_registry.metadata_ids == [10, 11]
     assert [call.calls for call in meta_registry.metadata_calls] == [
         [{"block_identifier": 123}],
@@ -1364,13 +1364,13 @@ async def test_curated_operator_group_updated_targets_only_changed_sub_node_oper
     assert "Changes:" in combined_message
     assert "Updated \\#10 \\- Operator Ten" in combined_message
     assert "Share: `0\\.04% \\-\\> 0\\.05%`" in combined_message
-    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in combined_message
+    assert "Effective allocation share: `20% \\-\\> 16\\.66%`" in combined_message
     assert "Removed \\#11 \\- Operator Eleven" in combined_message
     assert "Previous Share: `0\\.01%`" in combined_message
-    assert "Previous Effective allocation share: `50%`" in combined_message
+    assert "Previous Effective allocation share: `80%`" in combined_message
     assert "Added \\#12 \\- Operator Twelve" in combined_message
     assert "Share: `0\\.02%`" in combined_message
-    assert "Effective allocation share: `66\\.66%`" in combined_message
+    assert "Effective allocation share: `83\\.33%`" in combined_message
     assert "Effective weight" not in combined_message
     assert "Node Operator:" not in combined_message
 
@@ -1465,12 +1465,12 @@ async def test_curated_operator_group_batch_renders_net_diff_for_clear_and_creat
     assert "Group renamed: `Old Group` \\-\\> `New Group`" in message
     assert "Updated \\#10 \\- Operator Ten" in message
     assert "Share: `0\\.04% \\-\\> 0\\.05%`" in message
-    assert "Effective allocation share: `50% \\-\\> 33\\.33%`" in message
+    assert "Effective allocation share: `20% \\-\\> 16\\.66%`" in message
     assert "Removed \\#11 \\- Operator Eleven" in message
-    assert "Previous Effective allocation share: `50%`" in message
+    assert "Previous Effective allocation share: `80%`" in message
     assert "Added \\#12 \\- Operator Twelve" in message
     assert "Share: `0\\.02%`" in message
-    assert "Effective allocation share: `66\\.66%`" in message
+    assert "Effective allocation share: `83\\.33%`" in message
     assert "Effective weight" not in message
 
 

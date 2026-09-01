@@ -1685,20 +1685,18 @@ async def test_process_new_block_does_not_regress_persisted_block():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("persisted_block", "live_head", "expected_checkpoint"),
-    [(0, 25_586_956, 25_586_956), (25_586_960, 25_586_956, 25_586_960)],
-)
-async def test_checkpoint_current_head_does_not_regress_checkpoint(
-    persisted_block: int,
-    live_head: int,
-    expected_checkpoint: int,
-):
+async def test_establish_initial_checkpoint_replays_from_captured_head():
     supervisor = ModuleRuntimeSupervisor.__new__(ModuleRuntimeSupervisor)
-    supervisor._storage = _FakeSubscriptionStorage({"block": persisted_block})
-    supervisor.get_block_number = AsyncMock(return_value=live_head)
+    supervisor._storage = _FakeSubscriptionStorage({"block": 0})
+    supervisor.get_block_number = AsyncMock(return_value=25_586_956)
 
-    result = await supervisor.checkpoint_current_head()
+    async def catch_up_from(start_block: int) -> None:
+        assert start_block == 25_586_956
+        supervisor._storage.state.block.update(25_586_960)
 
-    assert result == live_head
-    assert supervisor._storage.state.block.value == expected_checkpoint
+    supervisor.catch_up_from = AsyncMock(side_effect=catch_up_from)
+
+    result = await supervisor.establish_initial_checkpoint()
+
+    assert result == 25_586_960
+    supervisor.catch_up_from.assert_awaited_once_with(25_586_956)

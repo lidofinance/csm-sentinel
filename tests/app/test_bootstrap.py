@@ -142,16 +142,16 @@ async def test_initial_checkpoint_is_available_before_periodic_update(tmp_path):
     )
     supervisor = MagicMock(spec=ModuleRuntimeSupervisor)
 
-    async def checkpoint_current_head() -> int:
+    async def establish_initial_checkpoint() -> int:
         application.bot_data["block"] = 25_600_000
         return 25_600_000
 
-    supervisor.checkpoint_current_head = AsyncMock(side_effect=checkpoint_current_head)
+    supervisor.establish_initial_checkpoint = AsyncMock(side_effect=establish_initial_checkpoint)
 
-    live_head = await _persist_initial_checkpoint(application, supervisor)
+    initial_checkpoint = await _persist_initial_checkpoint(application, supervisor)
 
     restarted_persistence = create_persistence(tmp_path)
-    assert live_head == 25_600_000
+    assert initial_checkpoint == 25_600_000
     assert (await restarted_persistence.get_bot_data())["block"] == 25_600_000
 
 

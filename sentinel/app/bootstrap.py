@@ -84,10 +84,10 @@ async def _persist_initial_checkpoint(
     if persistence is None:
         raise RuntimeError("Persistence is required for the initial chain checkpoint")
 
-    live_head = await module_supervisor.checkpoint_current_head()
+    initial_checkpoint = await module_supervisor.establish_initial_checkpoint()
     await application.update_persistence()
     await persistence.flush()
-    return live_head
+    return initial_checkpoint
 
 
 async def create_runtime() -> BotRuntime:
@@ -315,10 +315,13 @@ async def _run(runtime: BotRuntime) -> None:
         await _wait_for_subscription_start(module_supervisor, module_supervisor_task)
 
         if block_from == 0:
-            live_head = await _persist_initial_checkpoint(application, module_supervisor)
+            initial_checkpoint = await _persist_initial_checkpoint(
+                application,
+                module_supervisor,
+            )
             logger.info(
-                "Historical backfill skipped. Starting from live head: %s",
-                live_head,
+                "Historical backfill skipped. Initial checkpoint established at block: %s",
+                initial_checkpoint,
             )
 
         runtime.health.mark_startup_complete()

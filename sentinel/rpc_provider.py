@@ -718,11 +718,13 @@ class FallbackSubscriptionProvider(WebSocketProvider, FallbackConnectionBase):
                 and isinstance(normalized, RpcSubscriptionReconnectRequired)
                 and endpoint is not None
             ):
-                await self._record_subscription_endpoint_failure(
+                cooldown = await self._record_subscription_endpoint_failure(
                     endpoint,
                     normalized.failure,
                     method=normalized.method,
                 )
+                if cooldown:
+                    await self.pool.mark_failed(endpoint)
             raise normalized from None
 
         if endpoint is not None:

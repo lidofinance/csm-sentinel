@@ -520,6 +520,30 @@ async def test_subscription_listener_normalizes_raw_rpc_error():
 
 
 @pytest.mark.asyncio
+async def test_subscription_listener_rpc_rejection_cools_down_endpoint():
+    pool = RpcEndpointPool(
+        ("ws://primary.invalid", "ws://fallback.invalid"),
+        cooldown_seconds=60,
+    )
+    provider = _provider(pool, role="subscription")
+    primary = pool.endpoints[0]
+    provider._listener_endpoint = primary  # noqa: SLF001
+    await pool.mark_success(primary)
+    provider._provider_specific_socket_reader = AsyncMock(  # noqa: SLF001
+        side_effect=Web3RPCError(
+            message="capacity exceeded",
+            rpc_response={"error": {"code": -32005, "message": "capacity exceeded"}},
+        )
+    )
+
+    with pytest.raises(RpcSubscriptionReconnectRequired):
+        await provider._message_listener()  # noqa: SLF001
+
+    candidates, _ = await pool.candidates()
+    assert candidates == (pool.endpoints[1],)
+
+
+@pytest.mark.asyncio
 async def test_repeated_subscription_listener_failure_cools_down_endpoint(monkeypatch):
     pool = RpcEndpointPool(
         ("ws://primary.invalid", "ws://fallback.invalid"),
