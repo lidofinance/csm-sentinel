@@ -85,6 +85,30 @@ async def test_provider_connects_to_fallback_when_primary_is_unavailable(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_provider_closes_disconnected_transport_before_reconnecting(monkeypatch):
+    pool = RpcEndpointPool(("ws://primary.invalid", "ws://fallback.invalid"))
+    provider = _request_provider(pool)
+    primary = pool.endpoints[0]
+    provider.active_endpoint = primary
+    calls: list[str] = []
+
+    async def close_endpoint():
+        calls.append("close")
+
+    async def open_endpoint(endpoint):
+        calls.append(f"open:{endpoint.index}")
+
+    monkeypatch.setattr(provider, "is_connected", AsyncMock(return_value=False))
+    monkeypatch.setattr(provider, "_close_endpoint", close_endpoint)
+    monkeypatch.setattr(provider, "_open_endpoint", open_endpoint)
+
+    await provider.connect()
+
+    assert calls == ["close", "open:0"]
+    assert provider.active_endpoint == primary
+
+
+@pytest.mark.asyncio
 async def test_provider_raises_when_endpoint_chain_differs_from_pool(monkeypatch):
     pool = RpcEndpointPool(
         ("ws://wrong-chain.invalid", "ws://correct-chain.invalid"),

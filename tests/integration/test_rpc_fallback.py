@@ -694,7 +694,7 @@ async def test_supervisor_replays_blocks_mined_during_primary_outage(
 
     try:
         await supervisor.wait_until_subscribed(timeout=10)
-        assert await supervisor.establish_initial_checkpoint() == 1
+        assert await supervisor.establish_initial_checkpoint() == 0
 
         await stop_anvil(primary)
         fallback_w3 = AsyncWeb3(AsyncHTTPProvider(fallback.http_url))

@@ -398,6 +398,10 @@ class FallbackConnectionBase:
                     await self._close_safely()
                 elif await self.is_connected():
                     return
+                else:
+                    self.active_endpoint = None
+                    self._observer.endpoint_disconnected(self.role)
+                    await self._close_safely()
 
             completed_rounds = 0
             while connection_rounds == -1 or completed_rounds < connection_rounds:
