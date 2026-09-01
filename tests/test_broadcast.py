@@ -2,7 +2,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, call
 
 import pytest
+from telegram import Bot, Update
+from telegram.ext import MessageHandler
 
+from sentinel.handlers import build_conversation_handler
 from sentinel.handlers.admin import broadcast as broadcast_handlers
 from sentinel.handlers.admin.broadcast import BroadcastSession
 from sentinel.handlers.state import Callback, States
@@ -38,7 +41,6 @@ def _context():
             BroadcastSession.PREVIEW_CHAT_ID_KEY: PROMPT_CHAT_ID,
             BroadcastSession.PREVIEW_MESSAGE_ID_KEY: 301,
             BroadcastSession.SELECTED_IDS_KEY: {"99"},
-            BroadcastSession.MESSAGE_TEXT_KEY: "current preview text",
         },
         bot=SimpleNamespace(
             copy_message=AsyncMock(),
@@ -139,7 +141,6 @@ async def test_selected_confirmation_consumes_preview_before_sending(monkeypatch
     assert BroadcastSession.PREVIEW_CHAT_ID_KEY not in context.user_data
     assert BroadcastSession.PREVIEW_MESSAGE_ID_KEY not in context.user_data
     assert BroadcastSession.SELECTED_IDS_KEY not in context.user_data
-    assert BroadcastSession.MESSAGE_TEXT_KEY not in context.user_data
     assert update.callback_query.answer.await_args_list == [
         call(),
         call("This confirmation has expired.", show_alert=True),
@@ -166,3 +167,123 @@ async def test_all_confirmation_is_bound_to_its_preview():
         from_chat_id=PROMPT_CHAT_ID,
         message_id=401,
     )
+
+
+@pytest.mark.parametrize(
+    "message_data",
+    [
+        {"text": "hello"},
+        {
+            "photo": [
+                {
+                    "file_id": "photo-id",
+                    "file_unique_id": "photo-unique-id",
+                    "width": 100,
+                    "height": 100,
+                }
+            ],
+            "caption": "photo caption",
+        },
+        {
+            "document": {
+                "file_id": "document-id",
+                "file_unique_id": "document-unique-id",
+            }
+        },
+    ],
+    ids=["text", "photo", "document"],
+)
+def test_broadcast_states_accept_text_and_attachments(message_data):
+    update = Update.de_json(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 700,
+                "date": 0,
+                "chat": {"id": PROMPT_CHAT_ID, "type": "private"},
+                **message_data,
+            },
+        },
+        Bot("123:ABC"),
+    )
+    conversation = build_conversation_handler()
+
+    for state in (
+        States.ADMIN_BROADCAST_MESSAGE_ALL,
+        States.ADMIN_BROADCAST_MESSAGE_SELECTED,
+    ):
+        message_handler = next(
+            handler for handler in conversation.states[state] if isinstance(handler, MessageHandler)
+        )
+        assert message_handler.check_update(update)
+
+
+def test_broadcast_states_ignore_commands():
+    update = Update.de_json(
+        {
+            "update_id": 1,
+            "message": {
+                "message_id": 700,
+                "date": 0,
+                "chat": {"id": PROMPT_CHAT_ID, "type": "private"},
+                "text": "/start",
+                "entities": [{"type": "bot_command", "offset": 0, "length": 6}],
+            },
+        },
+        Bot("123:ABC"),
+    )
+    conversation = build_conversation_handler()
+
+    for state in (
+        States.ADMIN_BROADCAST_MESSAGE_ALL,
+        States.ADMIN_BROADCAST_MESSAGE_SELECTED,
+    ):
+        message_handler = next(
+            handler for handler in conversation.states[state] if isinstance(handler, MessageHandler)
+        )
+        assert not message_handler.check_update(update)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("handler", "expected_state"),
+    [
+        (
+            broadcast_handlers.broadcast_all_message,
+            States.ADMIN_BROADCAST_MESSAGE_ALL,
+        ),
+        (
+            broadcast_handlers.broadcast_selected_message,
+            States.ADMIN_BROADCAST_MESSAGE_SELECTED,
+        ),
+    ],
+    ids=["all", "selected"],
+)
+async def test_broadcast_message_creates_preview_for_attachment_without_text(
+    handler,
+    expected_state,
+):
+    context = _context()
+    context.runtime.module_adapter.texts.ADMIN_BROADCAST_PREVIEW_ALL = "Preview all"
+    context.runtime.module_adapter.texts.ADMIN_BROADCAST_PREVIEW_SELECTED = "Preview {targets}"
+    context.runtime.module_adapter.texts.ADMIN_BROADCAST_CONFIRM_HINT = "Confirm"
+    context.bot.copy_message.return_value = SimpleNamespace(message_id=701)
+    context.bot.edit_message_text = AsyncMock(return_value=None)
+    attachment = SimpleNamespace(
+        chat_id=PROMPT_CHAT_ID,
+        message_id=700,
+        delete=AsyncMock(),
+    )
+    update = SimpleNamespace(message=attachment, effective_chat=None)
+
+    state = await handler.__wrapped__(update, context)
+
+    assert state == expected_state
+    context.bot.copy_message.assert_awaited_once_with(
+        chat_id=PROMPT_CHAT_ID,
+        from_chat_id=PROMPT_CHAT_ID,
+        message_id=700,
+    )
+    attachment.delete.assert_awaited_once_with()
+    assert context.user_data[BroadcastSession.PREVIEW_CHAT_ID_KEY] == PROMPT_CHAT_ID
+    assert context.user_data[BroadcastSession.PREVIEW_MESSAGE_ID_KEY] == 701
