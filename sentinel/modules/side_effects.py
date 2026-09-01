@@ -28,7 +28,21 @@ class CuratedMetadataCacheProcessor:
         )
 
 
-EventSideEffectProcessor = NodeOperatorCountProcessor | CuratedMetadataCacheProcessor
+class StakingModuleIdRefreshProcessor:
+    def __init__(self, module_adapter: CommunityModuleAdapter | CuratedModuleAdapter) -> None:
+        self.module_adapter = module_adapter
+
+    async def process_event(self, event: Event) -> None:
+        if event.event != "Resumed":
+            return
+        if event.address.lower() != self.module_adapter.addresses.module.lower():
+            return
+        await self.module_adapter.refresh_staking_module_id()
+
+
+EventSideEffectProcessor = (
+    NodeOperatorCountProcessor | CuratedMetadataCacheProcessor | StakingModuleIdRefreshProcessor
+)
 
 
 class ModuleEventSideEffects:
@@ -38,12 +52,16 @@ class ModuleEventSideEffects:
     @staticmethod
     def _processors_for(module_adapter) -> tuple[EventSideEffectProcessor, ...]:
         if isinstance(module_adapter, CommunityModuleAdapter):
-            return (NodeOperatorCountProcessor(module_adapter),)
+            return (
+                NodeOperatorCountProcessor(module_adapter),
+                StakingModuleIdRefreshProcessor(module_adapter),
+            )
 
         if isinstance(module_adapter, CuratedModuleAdapter):
             return (
                 CuratedMetadataCacheProcessor(module_adapter),
                 NodeOperatorCountProcessor(module_adapter),
+                StakingModuleIdRefreshProcessor(module_adapter),
             )
 
         return ()

@@ -33,6 +33,7 @@ from sentinel.modules.aggregation import (
     AggregationKey,
     AggregationWindow,
     DistributionReportAggregator,
+    GlobalEventAggregator,
     NodeOperatorEventAggregator,
     OperatorGroupChangeAggregator,
 )
@@ -1111,7 +1112,32 @@ def test_event_handler_rejects_aggregation_and_digest_buffering_together():
         )
 
 
-def test_operator_group_aggregator_passes_through_supporting_events_without_group_changes():
+def test_global_event_aggregator_batches_all_operators_in_one_block():
+    aggregator = GlobalEventAggregator(
+        group=AggregationGroups.NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGES,
+        event_names=frozenset({"NodeOperatorEffectiveWeightChanged"}),
+    )
+    events = [
+        Event(
+            event="NodeOperatorEffectiveWeightChanged",
+            args={"nodeOperatorId": node_operator_id, "oldWeight": 1, "newWeight": 2},
+            block=123,
+            tx=HexBytes(node_operator_id),
+            address="0x0000000000000000000000000000000000000000",
+            log_index=node_operator_id,
+            transaction_index=0,
+        )
+        for node_operator_id in (10, 11)
+    ]
+
+    notifications = aggregator.aggregate(reversed(events))
+
+    assert len(notifications) == 1
+    assert notifications[0].source_events == tuple(events)
+
+
+def test_operator_group_aggregator_only_accepts_group_state_events():
+    aggregator = OperatorGroupChangeAggregator()
     events = [
         _make_operator_group_event(
             "NodeOperatorEffectiveWeightChanged",
@@ -1125,12 +1151,12 @@ def test_operator_group_aggregator_passes_through_supporting_events_without_grou
         ),
     ]
 
-    notifications = OperatorGroupChangeAggregator().aggregate(events)
-
-    assert [notification.source_events for notification in notifications] == [
-        (events[0],),
-        (events[1],),
-    ]
+    assert aggregator.event_names == {
+        "OperatorGroupCreated",
+        "OperatorGroupUpdated",
+        "OperatorGroupCleared",
+    }
+    assert aggregator.aggregate(events) == []
 
 
 def test_operator_group_aggregator_collapses_clear_and_create_into_update_diff():
@@ -1142,15 +1168,6 @@ def test_operator_group_aggregator_collapses_clear_and_create_into_update_diff()
     }
     events = [
         _make_operator_group_event("OperatorGroupCleared", group_id=7, log_index=1),
-        Event(
-            "NodeOperatorEffectiveWeightChanged",
-            args={"nodeOperatorId": 10, "oldWeight": 1, "newWeight": 2},
-            block=123,
-            tx=HexBytes("0xdeadbeef"),
-            address="0x0000000000000000000000000000000000000000",
-            log_index=2,
-            transaction_index=0,
-        ),
         _make_operator_group_event(
             "OperatorGroupCreated",
             group_id=7,
@@ -1169,43 +1186,29 @@ def test_operator_group_aggregator_collapses_clear_and_create_into_update_diff()
     }
 
 
-def test_operator_group_aggregator_keeps_unrelated_supporting_events_in_group_block():
-    recreated_group = {
-        "name": "New Group",
-        "subNodeOperators": [
-            {"nodeOperatorId": 10, "share": 10_000},
-        ],
-    }
-    events = [
-        _make_operator_group_event(
-            "OperatorGroupUpdated",
-            group_id=7,
-            group_info=recreated_group,
-            log_index=1,
-        ),
-        _make_operator_group_event(
-            "BondCurveWeightSet",
-            group_id=0,
-            log_index=2,
-        ),
-        Event(
-            event="NodeOperatorEffectiveWeightChanged",
-            args={"nodeOperatorId": 99, "oldWeight": 1, "newWeight": 2},
-            block=123,
-            tx=HexBytes("0xdeadbeef"),
-            address="0x0000000000000000000000000000000000000000",
-            log_index=3,
-            transaction_index=0,
-        ),
-    ]
-
-    notifications = OperatorGroupChangeAggregator().aggregate(events)
-
-    assert [notification.event for notification in notifications] == [
+def test_operator_group_aggregator_collapses_intermediate_and_final_updates():
+    intermediate_event = _make_operator_group_event(
         "OperatorGroupUpdated",
-        "BondCurveWeightSet",
-        "NodeOperatorEffectiveWeightChanged",
-    ]
+        group_id=7,
+        group_info={"name": "Group", "subNodeOperators": []},
+        log_index=1,
+    )
+    final_group = {
+        "name": "Group",
+        "subNodeOperators": [{"nodeOperatorId": 10, "share": 10_000}],
+    }
+    final_event = _make_operator_group_event(
+        "OperatorGroupUpdated",
+        group_id=7,
+        group_info=final_group,
+        log_index=2,
+    )
+
+    notifications = OperatorGroupChangeAggregator().aggregate([intermediate_event, final_event])
+
+    assert len(notifications) == 1
+    assert notifications[0].source_events == (intermediate_event, final_event)
+    assert notifications[0].args == {"groupId": 7, "groupInfo": final_group}
 
 
 @pytest.mark.asyncio
@@ -1682,20 +1685,18 @@ async def test_process_new_block_does_not_regress_persisted_block():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("persisted_block", "live_head", "expected_checkpoint"),
-    [(0, 25_586_956, 25_586_956), (25_586_960, 25_586_956, 25_586_960)],
-)
-async def test_checkpoint_current_head_does_not_regress_checkpoint(
-    persisted_block: int,
-    live_head: int,
-    expected_checkpoint: int,
-):
+async def test_establish_initial_checkpoint_replays_from_captured_head():
     supervisor = ModuleRuntimeSupervisor.__new__(ModuleRuntimeSupervisor)
-    supervisor._storage = _FakeSubscriptionStorage({"block": persisted_block})
-    supervisor.get_block_number = AsyncMock(return_value=live_head)
+    supervisor._storage = _FakeSubscriptionStorage({"block": 0})
+    supervisor.get_block_number = AsyncMock(return_value=25_586_956)
 
-    result = await supervisor.checkpoint_current_head()
+    async def catch_up_from(start_block: int) -> None:
+        assert start_block == 25_586_956
+        supervisor._storage.state.block.update(25_586_960)
 
-    assert result == live_head
-    assert supervisor._storage.state.block.value == expected_checkpoint
+    supervisor.catch_up_from = AsyncMock(side_effect=catch_up_from)
+
+    result = await supervisor.establish_initial_checkpoint()
+
+    assert result == 25_586_960
+    supervisor.catch_up_from.assert_awaited_once_with(25_586_956)

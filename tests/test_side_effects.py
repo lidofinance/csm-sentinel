@@ -11,6 +11,7 @@ from sentinel.modules.side_effects import (
     CuratedMetadataCacheProcessor,
     ModuleEventSideEffects,
     NodeOperatorCountProcessor,
+    StakingModuleIdRefreshProcessor,
 )
 
 
@@ -71,6 +72,24 @@ async def test_node_operator_count_side_effect_updates_count_cache_from_added_ev
     )
 
     assert remembered == [9]
+
+
+@pytest.mark.asyncio
+async def test_staking_module_id_refresh_side_effect_only_handles_module_resumed_event():
+    module_address = "0x0000000000000000000000000000000000000abc"
+    adapter = SimpleNamespace(
+        addresses=SimpleNamespace(module=module_address),
+        refresh_staking_module_id=AsyncMock(),
+    )
+    processor = StakingModuleIdRefreshProcessor(cast(CuratedModuleAdapter, adapter))
+
+    await processor.process_event(_event("Resumed", {}, module_address))
+    await processor.process_event(
+        _event("Resumed", {}, "0x0000000000000000000000000000000000000def")
+    )
+    await processor.process_event(_event("Paused", {}, module_address))
+
+    adapter.refresh_staking_module_id.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

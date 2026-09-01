@@ -59,7 +59,7 @@ class BaseModule(EventMessageEngineBase):
                 int(last_event.args["depositedKeysCount"]),
             )
 
-        footer = await self.digest_footer(event)
+        footer = await self.block_range_footer(event)
 
         def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
             entries = [
@@ -141,7 +141,7 @@ class BaseModule(EventMessageEngineBase):
     async def block_footer(self, event: EventNotification) -> str:
         raise NotImplementedError
 
-    async def digest_footer(self, event: EventNotification) -> str:
+    async def block_range_footer(self, event: EventNotification) -> str:
         start_block, end_block = self.notification_block_range(event)
         block_links = [(str(start_block), self.block_link(start_block))]
         if end_block != start_block:

@@ -130,7 +130,10 @@ class RpcSubscriptionReconnectRequired(RpcAvailabilityError):
         )
 
 
-def _normalize_subscription_exception(exc: BaseException) -> RpcAvailabilityError | None:
+def _normalize_subscription_exception(
+    exc: BaseException,
+    endpoint: RpcEndpoint | None = None,
+) -> RpcAvailabilityError | None:
     """Translate provider-library failures at the subscription boundary."""
 
     if isinstance(exc, RpcAvailabilityError):
@@ -140,7 +143,7 @@ def _normalize_subscription_exception(exc: BaseException) -> RpcAvailabilityErro
     if isinstance(exc, _RPC_ENDPOINT_FAILURES):
         return RpcSubscriptionReconnectRequired(
             RPCEndpoint("subscription_stream"),
-            _failure_summary(None, exc),
+            _failure_summary(endpoint, exc),
         )
     return None
 
@@ -675,6 +678,7 @@ class FallbackSubscriptionProvider(WebSocketProvider, FallbackConnectionBase):
         if max_connection_retries < 1:
             raise ValueError("max_connection_retries must be a positive integer")
         self.observer = observer
+        self._listener_endpoint: RpcEndpoint | None = None
         websocket_kwargs = dict(kwargs.pop("websocket_kwargs", {}))
         websocket_kwargs["user_agent_header"] = application_user_agent()
         super().__init__(
@@ -695,20 +699,49 @@ class FallbackSubscriptionProvider(WebSocketProvider, FallbackConnectionBase):
     def __str__(self) -> str:
         return f"Fallback WebSocket connection ({self.role}, {self.active_endpoint_label})"
 
-    def _handle_listener_task_exceptions(self) -> None:
+    async def _message_listener(self) -> None:
+        endpoint = self._listener_endpoint or self.active_endpoint
         try:
-            super()._handle_listener_task_exceptions()
+            await super()._message_listener()
         except BaseException as exc:
-            normalized = _normalize_subscription_exception(exc)
+            normalized = _normalize_subscription_exception(exc, endpoint)
             if normalized is None:
                 raise
             logger.warning(
                 "%s endpoint %s subscription listener failed: %s",
                 self.role,
-                self.active_endpoint_label,
+                self.active_endpoint_label if endpoint is None else endpoint.label,
                 exc.__class__.__name__,
             )
+            if (
+                not isinstance(exc, RpcAvailabilityError)
+                and isinstance(normalized, RpcSubscriptionReconnectRequired)
+                and endpoint is not None
+            ):
+                cooldown = await self._record_subscription_endpoint_failure(
+                    endpoint,
+                    normalized.failure,
+                    method=normalized.method,
+                )
+                if cooldown:
+                    await self.pool.mark_failed(endpoint)
             raise normalized from None
+
+        if endpoint is not None:
+            logger.warning(
+                "%s endpoint %s subscription listener closed",
+                self.role,
+                endpoint.label,
+            )
+            await self._record_subscription_endpoint_failure(
+                endpoint,
+                RpcFailureSummary(
+                    endpoint_index=endpoint.index,
+                    endpoint_label=endpoint.label,
+                    kind=RpcFailureKind.TRANSPORT,
+                ),
+                method=RPCEndpoint("subscription_stream"),
+            )
 
     @property
     def active_endpoint_label(self) -> str:
@@ -734,8 +767,6 @@ class FallbackSubscriptionProvider(WebSocketProvider, FallbackConnectionBase):
             return await _invoke_rpc_operation(operation, endpoint)
         except _RpcOperationFailed as exc:
             failure = exc.failure
-            self.observer.endpoint_failed(self.role, endpoint.metric_label, failure.kind.value)
-            self.observer.persistent_request_failed(self.role, str(method), failure.kind.value)
             rejected = failure.kind is RpcFailureKind.RPC_REJECTED
             if rejected:
                 logger.warning(
@@ -746,21 +777,60 @@ class FallbackSubscriptionProvider(WebSocketProvider, FallbackConnectionBase):
                     failure.rpc_code,
                     exc.log_message,
                 )
-            cooldown = rejected or await self.pool.record_subscription_transport_failure(endpoint)
-            await self._invalidate_endpoint(
+            await self._handle_subscription_endpoint_failure(
                 endpoint,
                 generation,
-                cooldown=cooldown,
-                log_connection_loss=not cooldown,
+                failure,
+                method=method,
             )
             raise RpcSubscriptionReconnectRequired(method, failure) from None
 
+    async def _handle_subscription_endpoint_failure(
+        self,
+        endpoint: RpcEndpoint,
+        generation: int,
+        failure: RpcFailureSummary,
+        *,
+        method: RPCEndpoint,
+    ) -> None:
+        cooldown = await self._record_subscription_endpoint_failure(
+            endpoint,
+            failure,
+            method=method,
+        )
+        await self._invalidate_endpoint(
+            endpoint,
+            generation,
+            cooldown=cooldown,
+            log_connection_loss=not cooldown,
+        )
+
+    async def _record_subscription_endpoint_failure(
+        self,
+        endpoint: RpcEndpoint,
+        failure: RpcFailureSummary,
+        *,
+        method: RPCEndpoint,
+    ) -> bool:
+        self.observer.endpoint_failed(self.role, endpoint.metric_label, failure.kind.value)
+        self.observer.persistent_request_failed(self.role, str(method), failure.kind.value)
+        rejected = failure.kind is RpcFailureKind.RPC_REJECTED
+        return rejected or await self.pool.record_subscription_transport_failure(endpoint)
+
     async def _open_endpoint(self, endpoint: RpcEndpoint) -> None:
         self.endpoint_uri = URI(endpoint.uri)
-        await super().connect()
+        self._listener_endpoint = endpoint
+        try:
+            await super().connect()
+        except BaseException:
+            self._listener_endpoint = None
+            raise
 
     async def _close_endpoint(self) -> None:
-        await super().disconnect()
+        try:
+            await super().disconnect()
+        finally:
+            self._listener_endpoint = None
 
     async def disconnect(self) -> None:
         await self._disconnect_with_fallback()

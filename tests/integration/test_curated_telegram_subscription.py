@@ -65,6 +65,21 @@ def _has_expected_message(harness, *, event_name: str, expected_markdown: str | 
     return expected_markdown in messages
 
 
+def _has_expected_message_fragments(
+    harness,
+    *,
+    event_name: str,
+    expected_fragments: tuple[str, ...],
+) -> bool:
+    return any(
+        rendered is not None and all(fragment in rendered for fragment in expected_fragments)
+        for event, plan in harness.processed_events
+        if event is not None
+        and event.event == event_name
+        and (rendered := _render_plan(plan)) is not None
+    )
+
+
 def _has_expected_node_operator_messages(
     harness, *, event_name: str, expected_messages: dict[str, str]
 ) -> bool:
@@ -91,6 +106,7 @@ async def _exercise_curated_event(
     expected_markdown: str | None,
     anvil_launcher,
     expected_per_node: dict[str, str] | None = None,
+    expected_fragments: tuple[str, ...] | None = None,
     deposit_digest: bool = False,
 ) -> None:
     replay_end_block = fork_block
@@ -100,11 +116,22 @@ async def _exercise_curated_event(
         await harness.replay_blocks(fork_block - 1, replay_end_block)
         if deposit_digest:
             await harness.flush_digest(replay_end_block)
-        assert _has_expected_message(
-            harness, event_name=event_name, expected_markdown=expected_markdown
-        ), (
+        if expected_fragments is None:
+            found_expected_message = _has_expected_message(
+                harness,
+                event_name=event_name,
+                expected_markdown=expected_markdown,
+            )
+        else:
+            found_expected_message = _has_expected_message_fragments(
+                harness,
+                event_name=event_name,
+                expected_fragments=expected_fragments,
+            )
+        assert found_expected_message, (
             f"Did not find expected Curated message for event {event_name}, \n"
             f"{expected_markdown=}\n"
+            f"{expected_fragments=}\n"
             f"found={[_render_plan(plan) for event, plan in harness.processed_events]}"
         )
         if expected_per_node is not None:
@@ -182,10 +209,10 @@ async def test_curated_process_blocks_node_operator_effective_weight_changed(
         event_name="NodeOperatorEffectiveWeightChanged",
         fork_block=2766235,
         expected_markdown=(
-            "ℹ️ *Operator effective weight changed*\n\n"
-            "Effective weight: `0 \\-\\> 100000`\n\n"
-            "Node Operator: \\#0 \\- Attestant \\(BVI\\) Limited\n"
-            "[Transaction](https://etherscan.io/tx/0xdeadbeef)"
+            "ℹ️ *Operator effective weights changed*\n\n"
+            "Node Operators:\n"
+            "\\- \\#0 \\- Attestant \\(BVI\\) Limited: `0 \\-\\> 100000`\n\n"
+            "Block: [2766235](https://etherscan.io/block/2766235)"
         ),
         anvil_launcher=anvil_launcher,
     )
@@ -237,10 +264,12 @@ async def test_curated_process_blocks_operator_group_updated(anvil_launcher):
         event_name="OperatorGroupUpdated",
         fork_block=2892438,
         expected_markdown=None,
-        expected_per_node={
-            "0": ("Share: `50% \\-\\> 100%`\n  Effective allocation share: `50% \\-\\> 100%`"),
-            "1": ("Share: `50% \\-\\> 0%`\n  Effective allocation share: `50% \\-\\> 0%`"),
-        },
+        expected_fragments=(
+            "Share: `50% \\-\\> 100%`\n  Effective allocation share: `50% \\-\\> 100%`",
+            "\\- Updated \\#1 \\- Sigma Prime\n"
+            "  Share: `50% \\-\\> 0%`\n"
+            "  Effective allocation share: `50% \\-\\> 0%`",
+        ),
         anvil_launcher=anvil_launcher,
     )
 

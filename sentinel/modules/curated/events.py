@@ -1,6 +1,6 @@
 import datetime
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from async_lru import alru_cache
@@ -10,6 +10,10 @@ from sentinel.models import Event, EventHandler, EventNotification
 from sentinel.modules.aggregation import AggregationGroups
 from sentinel.modules.base_events import BaseModule, _format_date
 from sentinel.modules.curated.adapter import CURATED_EVENTS
+from sentinel.modules.curated.operator_groups import (
+    OperatorAllocation,
+    OperatorGroupChange,
+)
 from sentinel.modules.curated.texts import (
     CURATED_EVENT_DESCRIPTIONS,
     CURATED_EVENT_MESSAGES,
@@ -75,17 +79,10 @@ def _sub_node_operator_ids(group_info) -> set[int]:
     }
 
 
-def _sub_node_operator_shares(group_info) -> dict[int, int]:
-    return {
-        int(read_field(operator, "nodeOperatorId", 0)): int(read_field(operator, "share", 1))
-        for operator in _sub_node_operators(group_info)
-    }
-
-
-def _weight_share_basis_points(share: int, weight: int, total_weighted_share: int) -> int:
-    if total_weighted_share <= 0:
+def _weight_basis_points(weight: int, total_weight: int) -> int:
+    if total_weight <= 0:
         return 0
-    return share * weight * 10_000 // total_weighted_share
+    return weight * 10_000 // total_weight
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,31 +176,25 @@ class CuratedEventMessages(BaseModule):
     async def _digest_operator_label(self, node_operator_id: int, block: int) -> str:
         return await self._node_operator_label(node_operator_id, block)
 
-    async def _sub_node_operator_allocations(self, group_info, block: int) -> list[dict]:
+    async def _sub_node_operator_allocations(
+        self,
+        group_info,
+        block: int,
+    ) -> list[OperatorAllocation]:
         sub_node_operators = _sub_node_operators(group_info)
         node_operator_ids = [
             int(read_field(operator, "nodeOperatorId", 0)) for operator in sub_node_operators
         ]
         weights = await self._fetch_node_operator_weights(tuple(node_operator_ids), block)
-        total_weighted_share = sum(
-            int(read_field(operator, "share", 1)) * weights[node_operator_id]
-            for operator, node_operator_id in zip(
-                sub_node_operators, node_operator_ids, strict=True
-            )
-        )
+        total_weight = sum(weights.values())
 
         return [
-            {
-                "nodeOperatorId": node_operator_id,
-                "share": int(read_field(operator, "share", 1)),
-                "effectiveWeight": weights[node_operator_id],
-                "weightedShare": _weight_share_basis_points(
-                    int(read_field(operator, "share", 1)),
-                    weights[node_operator_id],
-                    total_weighted_share,
-                ),
-                "label": await self._node_operator_label(node_operator_id, block),
-            }
+            OperatorAllocation(
+                node_operator_id=node_operator_id,
+                share=int(read_field(operator, "share", 1)),
+                effective_weight=weights[node_operator_id],
+                weighted_share=_weight_basis_points(weights[node_operator_id], total_weight),
+            )
             for operator, node_operator_id in zip(
                 sub_node_operators, node_operator_ids, strict=True
             )
@@ -259,7 +250,6 @@ class CuratedEventMessages(BaseModule):
     async def resumed(self, event: EventNotification):
         if event.address.lower() != self.module_address.lower():
             return None
-        await self.module_adapter.refresh_staking_module_id()
         template = self._require_message_template(event.event)
         return template() + await self.notification_footer(event)
 
@@ -350,9 +340,41 @@ class CuratedEventMessages(BaseModule):
     @register_event("NodeOperatorEffectiveWeightChanged")
     async def node_operator_effective_weight_changed(self, event: EventNotification):
         template = self._require_message_template(event.event)
-        return template(
-            event.args["oldWeight"], event.args["newWeight"]
-        ) + await self.notification_footer(event)
+        events_by_operator: dict[int, list[Event]] = {}
+        for source_event in event.source_events:
+            node_operator_id = int(source_event.args["nodeOperatorId"])
+            events_by_operator.setdefault(node_operator_id, []).append(source_event)
+
+        entries_by_operator: dict[str, tuple[str, int, int]] = {}
+        for node_operator_id, operator_events in sorted(events_by_operator.items()):
+            old_weight = int(operator_events[0].args["oldWeight"])
+            new_weight = int(operator_events[-1].args["newWeight"])
+            if old_weight == new_weight:
+                continue
+            entries_by_operator[str(node_operator_id)] = (
+                await self._node_operator_label(node_operator_id, event.block),
+                old_weight,
+                new_weight,
+            )
+
+        if not entries_by_operator:
+            return None
+        footer = await self.block_range_footer(event)
+
+        def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
+            entries = [
+                entries_by_operator[node_operator_id]
+                for node_operator_id in sorted(
+                    node_operator_ids,
+                    key=lambda value: int(value),
+                )
+                if node_operator_id in entries_by_operator
+            ]
+            if not entries:
+                return ()
+            return (f"{template(entries)}{footer}",)
+
+        return NotificationPlan.per_chat(entries_by_operator, render)
 
     @register_event("OperatorGroupCreated")
     async def operator_group_created(self, event: EventNotification):
@@ -361,9 +383,17 @@ class CuratedEventMessages(BaseModule):
         operator_ids = _sub_node_operator_ids(group_info)
         if not operator_ids:
             return None
+        allocations = await self._sub_node_operator_allocations(group_info, event.block)
         message = template(
             event.args["groupId"],
-            await self._sub_node_operator_allocations(group_info, event.block),
+            allocations,
+            {
+                allocation.node_operator_id: await self._node_operator_label(
+                    allocation.node_operator_id,
+                    event.block,
+                )
+                for allocation in allocations
+            },
             group_name=_operator_group_name(group_info),
         ) + await self.notification_footer(event)
         return NotificationPlan.broadcast_to_operators(message, operator_ids)
@@ -378,86 +408,73 @@ class CuratedEventMessages(BaseModule):
         current_group = event.args["groupInfo"]
         previous_group_name = _operator_group_name(previous_group)
         current_group_name = _operator_group_name(current_group)
-        previous_shares = _sub_node_operator_shares(previous_group)
-        current_shares = _sub_node_operator_shares(current_group)
-        changed_operator_ids = set(previous_shares) ^ set(current_shares)
-        changed_operator_ids.update(
-            node_operator_id
-            for node_operator_id in set(previous_shares) & set(current_shares)
-            if previous_shares[node_operator_id] != current_shares[node_operator_id]
-        )
-        is_renamed = previous_group_name != current_group_name
-        if not changed_operator_ids:
-            if not is_renamed:
-                return None
-            operator_ids = set(current_shares)
-            if not operator_ids:
-                return None
-            message = template(
-                group_id,
-                change_kind="renamed",
-                old_group_name=previous_group_name,
-                new_group_name=current_group_name,
-            ) + await self.notification_footer(event)
-            return NotificationPlan.broadcast_to_operators(message, operator_ids)
-
         previous_operators = {
-            int(read_field(operator, "nodeOperatorId", 0)): operator
+            operator.node_operator_id: operator
             for operator in await self._sub_node_operator_allocations(
                 previous_group, event.block - 1
             )
         }
         current_operators = {
-            int(read_field(operator, "nodeOperatorId", 0)): operator
+            operator.node_operator_id: operator
             for operator in await self._sub_node_operator_allocations(current_group, event.block)
         }
-        target_operator_ids = changed_operator_ids | (set(current_shares) if is_renamed else set())
-        footer = await self.notification_footer(event)
-        operator_messages: dict[int, str] = {}
-        for node_operator_id in target_operator_ids:
-            if node_operator_id not in changed_operator_ids:
-                message = template(
-                    group_id,
-                    change_kind="renamed",
-                    old_group_name=previous_group_name,
-                    new_group_name=current_group_name,
+        previous_operator_ids = set(previous_operators)
+        current_operator_ids = set(current_operators)
+        changed_operator_ids = previous_operator_ids ^ current_operator_ids
+        changed_operator_ids.update(
+            node_operator_id
+            for node_operator_id in previous_operator_ids & current_operator_ids
+            if previous_operators[node_operator_id].share
+            != current_operators[node_operator_id].share
+        )
+        is_renamed = previous_group_name != current_group_name
+        if not changed_operator_ids and not is_renamed:
+            return None
+        target_operator_ids = changed_operator_ids | (current_operator_ids if is_renamed else set())
+        if not target_operator_ids:
+            return None
+
+        changes_by_operator: dict[int, OperatorGroupChange] = {}
+        for node_operator_id in sorted(changed_operator_ids):
+            node_operator_label = await self._node_operator_label(node_operator_id, event.block)
+            if node_operator_id not in previous_operators:
+                changes_by_operator[node_operator_id] = OperatorGroupChange(
+                    node_operator_id=node_operator_id,
+                    node_operator_label=node_operator_label,
+                    new_allocation=current_operators[node_operator_id],
                 )
-            elif node_operator_id not in previous_shares:
-                node_operator_label = await self._node_operator_label(node_operator_id, event.block)
-                message = template(
-                    group_id,
-                    node_operator_label,
-                    "added",
-                    new_operator=current_operators[node_operator_id],
-                    group_name=current_group_name,
-                    old_group_name=previous_group_name if is_renamed else None,
-                    new_group_name=current_group_name if is_renamed else None,
-                )
-            elif node_operator_id not in current_shares:
-                node_operator_label = await self._node_operator_label(node_operator_id, event.block)
-                message = template(
-                    group_id,
-                    node_operator_label,
-                    "removed",
-                    old_operator=previous_operators[node_operator_id],
-                    group_name=current_group_name,
-                    old_group_name=previous_group_name if is_renamed else None,
-                    new_group_name=current_group_name if is_renamed else None,
+            elif node_operator_id not in current_operators:
+                changes_by_operator[node_operator_id] = OperatorGroupChange(
+                    node_operator_id=node_operator_id,
+                    node_operator_label=node_operator_label,
+                    old_allocation=previous_operators[node_operator_id],
                 )
             else:
-                node_operator_label = await self._node_operator_label(node_operator_id, event.block)
-                message = template(
-                    group_id,
-                    node_operator_label,
-                    "changed",
-                    old_operator=previous_operators[node_operator_id],
-                    new_operator=current_operators[node_operator_id],
-                    group_name=current_group_name,
-                    old_group_name=previous_group_name if is_renamed else None,
-                    new_group_name=current_group_name if is_renamed else None,
+                changes_by_operator[node_operator_id] = OperatorGroupChange(
+                    node_operator_id=node_operator_id,
+                    node_operator_label=node_operator_label,
+                    old_allocation=previous_operators[node_operator_id],
+                    new_allocation=current_operators[node_operator_id],
                 )
-            operator_messages[node_operator_id] = f"{message}{footer}"
-        return NotificationPlan.per_operator(operator_messages)
+
+        footer = await self.notification_footer(event)
+
+        def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
+            changes = [
+                changes_by_operator[node_operator_id]
+                for node_operator_id in sorted(int(value) for value in node_operator_ids)
+                if node_operator_id in changes_by_operator
+            ]
+            message = template(
+                group_id,
+                changes,
+                group_name=current_group_name,
+                old_group_name=previous_group_name if is_renamed else None,
+                new_group_name=current_group_name if is_renamed else None,
+            )
+            return (f"{message}{footer}",)
+
+        return NotificationPlan.per_chat(target_operator_ids, render)
 
     @register_event("OperatorGroupCleared")
     async def operator_group_cleared(self, event: EventNotification):
@@ -478,22 +495,51 @@ class CuratedEventMessages(BaseModule):
     @register_event("BondCurveWeightSet")
     async def bond_curve_weight_set(self, event: EventNotification):
         template = self._require_message_template(event.event)
-        message = template(event.args["curveId"], event.args["weight"])
-        operator_ids = await self._node_operator_ids_for_bond_curve(
-            event.args["curveId"], event.block
-        )
-        if not operator_ids:
-            return None
+        events_by_curve_id: dict[int, Event] = {}
+        for source_event in event.source_events:
+            events_by_curve_id[int(source_event.args["curveId"])] = source_event
 
-        operator_messages: dict[int, str] = {}
-        for node_operator_id in operator_ids:
-            targeted_event = replace(
-                event.primary_event, args=dict(event.args) | {"nodeOperatorId": node_operator_id}
-            )
-            operator_messages[node_operator_id] = (
-                f"{message}{await self.event_footer(targeted_event)}"
-            )
-        return NotificationPlan.per_operator(operator_messages)
+        operator_ids_by_curve: dict[int, set[int]] = {}
+        all_operator_ids: set[int] = set()
+        for curve_id in events_by_curve_id:
+            operator_ids = await self._node_operator_ids_for_bond_curve(curve_id, event.block)
+            if not operator_ids:
+                continue
+            operator_ids_by_curve[curve_id] = operator_ids
+            all_operator_ids.update(operator_ids)
+
+        if not all_operator_ids:
+            return None
+        operator_labels = {
+            node_operator_id: await self._node_operator_label(node_operator_id, event.block)
+            for node_operator_id in sorted(all_operator_ids)
+        }
+        footer = await self.block_range_footer(event)
+
+        def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
+            chat_operator_ids = {int(node_operator_id) for node_operator_id in node_operator_ids}
+            entries: list[tuple[int, int, list[str]]] = []
+            for curve_id, source_event in events_by_curve_id.items():
+                matching_operator_ids = sorted(
+                    operator_ids_by_curve.get(curve_id, set()) & chat_operator_ids
+                )
+                if not matching_operator_ids:
+                    continue
+                entries.append(
+                    (
+                        curve_id,
+                        int(source_event.args["weight"]),
+                        [
+                            operator_labels[node_operator_id]
+                            for node_operator_id in matching_operator_ids
+                        ],
+                    )
+                )
+            if not entries:
+                return ()
+            return (f"{template(entries)}{footer}",)
+
+        return NotificationPlan.per_chat(all_operator_ids, render)
 
     @register_event("OperatorMetadataSet")
     async def operator_metadata_set(self, event: EventNotification):
