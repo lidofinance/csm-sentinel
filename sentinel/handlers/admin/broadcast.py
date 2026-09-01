@@ -21,7 +21,6 @@ def _texts(context: "BotContext"):
 class BroadcastSession:
     PROMPT_CHAT_ID_KEY = "broadcast_prompt_chat_id"
     PROMPT_MESSAGE_ID_KEY = "broadcast_prompt_message_id"
-    MESSAGE_TEXT_KEY = "broadcast_message_text"
     SELECTED_IDS_KEY = "broadcast_selected"
     PREVIEW_CHAT_ID_KEY = "broadcast_preview_chat_id"
     PREVIEW_MESSAGE_ID_KEY = "broadcast_preview_message_id"
@@ -38,15 +37,6 @@ class BroadcastSession:
     def clear_prompt(self) -> None:
         self._context.user_data.pop(self.PROMPT_CHAT_ID_KEY, None)
         self._context.user_data.pop(self.PROMPT_MESSAGE_ID_KEY, None)
-
-    def set_message_text(self, text: str) -> None:
-        self._context.user_data[self.MESSAGE_TEXT_KEY] = text
-
-    def get_message_text(self) -> str | None:
-        return self._context.user_data.get(self.MESSAGE_TEXT_KEY)
-
-    def clear_message_text(self) -> None:
-        self._context.user_data.pop(self.MESSAGE_TEXT_KEY, None)
 
     def set_selected_ids(self, ids: set[str]) -> None:
         self._context.user_data[self.SELECTED_IDS_KEY] = ids
@@ -126,7 +116,6 @@ async def broadcast_menu(update: Update, context: "BotContext") -> States:
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     session.store_prompt(updated_message)
-    session.clear_message_text()
     session.clear_selected_ids()
     return States.ADMIN_BROADCAST
 
@@ -147,7 +136,6 @@ async def broadcast_all_prompt(update: Update, context: "BotContext") -> States:
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     session.store_prompt(updated_message)
-    session.clear_message_text()
     return States.ADMIN_BROADCAST_MESSAGE_ALL
 
 
@@ -160,7 +148,6 @@ async def broadcast_by_no(update: Update, context: "BotContext") -> States:
     await _delete_preview_message(context)
     session = BroadcastSession(context)
     session.clear_selected_ids()
-    session.clear_message_text()
     keyboard = [
         [InlineKeyboardButton(_texts(context).BUTTON_BACK, callback_data=Callback.BACK.value)]
     ]
@@ -179,18 +166,6 @@ async def broadcast_all_message(update: Update, context: "BotContext") -> States
     if chat_id is None:
         return States.ADMIN_BROADCAST_MESSAGE_ALL
     session = BroadcastSession(context)
-    text = (message.text or "").strip() if message else ""
-
-    if not text:
-        await _delete_user_message(message)
-        await _edit_broadcast_prompt_message(
-            context,
-            chat_id,
-            _texts(context).ADMIN_BROADCAST_ENTER_MESSAGE_ALL,
-            _back_markup(context),
-        )
-        return States.ADMIN_BROADCAST_MESSAGE_ALL
-
     await _delete_preview_message(context)
     preview_id = await _copy_preview_message(context, chat_id, message)
     await _delete_user_message(message)
@@ -203,7 +178,6 @@ async def broadcast_all_message(update: Update, context: "BotContext") -> States
         )
         return States.ADMIN_BROADCAST_MESSAGE_ALL
 
-    session.set_message_text(text)
     await _edit_broadcast_prompt_message(
         context,
         chat_id,
@@ -253,7 +227,6 @@ async def broadcast_enter_no_ids_message(update: Update, context: "BotContext") 
         )
         return States.ADMIN_BROADCAST_SELECT_NO
     session.set_selected_ids(ids)
-    session.clear_message_text()
     pretty_ids = ", ".join(sorted(f"#{i}" for i in ids))
     prompt_text = (
         f"Node operators selected: {pretty_ids}\n\n"
@@ -275,8 +248,6 @@ async def broadcast_selected_message(update: Update, context: "BotContext") -> S
     if chat_id is None:
         return States.ADMIN_BROADCAST_MESSAGE_SELECTED
     session = BroadcastSession(context)
-    text = (message.text or "").strip() if message else ""
-
     selected = session.get_selected_ids()
     if not selected:
         await _delete_user_message(message)
@@ -287,17 +258,6 @@ async def broadcast_selected_message(update: Update, context: "BotContext") -> S
             _back_markup(context),
         )
         return States.ADMIN_BROADCAST_SELECT_NO
-    if not text:
-        pretty_ids = ", ".join(sorted(f"#{i}" for i in selected))
-        await _delete_user_message(message)
-        await _edit_broadcast_prompt_message(
-            context,
-            chat_id,
-            f"Message text is required for: {pretty_ids}. Please type the broadcast message.",
-            _back_markup(context),
-        )
-        return States.ADMIN_BROADCAST_MESSAGE_SELECTED
-
     await _delete_preview_message(context)
     preview_id = await _copy_preview_message(context, chat_id, message)
     await _delete_user_message(message)
@@ -311,7 +271,6 @@ async def broadcast_selected_message(update: Update, context: "BotContext") -> S
         return States.ADMIN_BROADCAST_MESSAGE_SELECTED
 
     pretty_ids = ", ".join(sorted(f"#{i}" for i in selected))
-    session.set_message_text(text)
     header = _texts(context).ADMIN_BROADCAST_PREVIEW_SELECTED.format(targets=pretty_ids)
     await _edit_broadcast_prompt_message(
         context,
@@ -367,7 +326,6 @@ async def broadcast_all_confirm(update: Update, context: "BotContext") -> States
         preview_message_id,
     )
     logger.info("Admin broadcast (all) attempted: sent=%s failed=%s", sent, failed)
-    session.clear_message_text()
     await _delete_preview_by_reference(
         context,
         preview_chat_id,
@@ -430,7 +388,6 @@ async def broadcast_selected_confirm(update: Update, context: "BotContext") -> S
         sent,
         failed,
     )
-    session.clear_message_text()
     session.clear_selected_ids()
     await _delete_preview_by_reference(
         context,
