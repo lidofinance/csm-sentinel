@@ -304,11 +304,11 @@ class ModuleRuntimeSupervisor:
     async def get_block_number(self) -> int:
         return await self.raw_subscription.get_block_number()
 
-    async def checkpoint_current_head(self) -> int:
+    async def establish_initial_checkpoint(self) -> int:
         head = await self.get_block_number()
         checkpoint = self._storage().block
-        checkpoint.update(max(checkpoint.value, head))
-        return head
+        checkpoint.update(max(head - 1, 0))
+        return checkpoint.value
 
     async def catch_up_from(self, start_block: int) -> None:
         replay_start_block = start_block

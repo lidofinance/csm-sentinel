@@ -12,6 +12,7 @@ from sentinel.chain import SharedChainConnection
 from sentinel.module_types import ModuleType
 from sentinel.modules.base import BaseModuleAdapter, EventSource
 from sentinel.modules.community.texts import CommunityTexts
+from sentinel.modules.distribution import DISTRIBUTION_REPORT_EVENTS
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +72,7 @@ COMMUNITY_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS = frozenset(
     }
 )
 COMMUNITY_NOTIFIABLE_EVENTS = COMMUNITY_EVENTS - COMMUNITY_TEMPORARILY_DISABLED_NOTIFIABLE_EVENTS
-COMMUNITY_SIDE_EFFECT_EVENTS = frozenset({"NodeOperatorAdded"})
+COMMUNITY_SIDE_EFFECT_EVENTS = frozenset({"NodeOperatorAdded", "Resumed"})
 
 
 class CommunityModuleAdapter(BaseModuleAdapter):
@@ -169,7 +170,7 @@ class CommunityModuleAdapter(BaseModuleAdapter):
             EventSource(
                 "fee_distributor",
                 self.addresses.fee_distributor,
-                frozenset({"DistributionLogUpdated"}),
+                DISTRIBUTION_REPORT_EVENTS,
             ),
             EventSource("exit_penalties", self.addresses.exit_penalties),
         )
@@ -189,7 +190,13 @@ class CommunityModuleAdapter(BaseModuleAdapter):
         return CommunityEventMessages(self)
 
     def event_aggregators(self):
-        from sentinel.modules.aggregation import node_operator_aggregators_from_event_handlers
+        from sentinel.modules.aggregation import (
+            DistributionReportAggregator,
+            node_operator_aggregators_from_event_handlers,
+        )
         from sentinel.modules.community.events import COMMUNITY_EVENTS_TO_FOLLOW
 
-        return node_operator_aggregators_from_event_handlers(COMMUNITY_EVENTS_TO_FOLLOW)
+        return (
+            *node_operator_aggregators_from_event_handlers(COMMUNITY_EVENTS_TO_FOLLOW),
+            DistributionReportAggregator(),
+        )

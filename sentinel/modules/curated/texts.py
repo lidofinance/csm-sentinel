@@ -1,3 +1,4 @@
+from collections.abc import Mapping, Sequence
 from enum import StrEnum
 
 from aiogram.utils.formatting import Bold, Code, Text, TextLink
@@ -5,6 +6,10 @@ from web3.constants import ADDRESS_ZERO
 
 from sentinel.config import get_config
 from sentinel.modules.catalog import EventDefinition, build_grouped_event_list_text
+from sentinel.modules.curated.operator_groups import (
+    OperatorAllocation,
+    OperatorGroupChange,
+)
 from sentinel.modules.formatting import (
     block_footer,
     block_footer_tx_only,
@@ -1069,33 +1074,49 @@ def bond_lock_period_changed(period):
 
 
 @register_event_message("NodeOperatorEffectiveWeightChanged")
-def node_operator_effective_weight_changed(old_weight, new_weight):
+def node_operator_effective_weight_changed(
+    entries: Sequence[tuple[str, int, int]],
+):
     parts: list = [
-        "🚨 " if new_weight == 0 else "ℹ️ ",
-        Bold("Operator effective weight changed"),
+        "🚨 " if any(new_weight == 0 for _, _, new_weight in entries) else "ℹ️ ",
+        Bold("Operator effective weights changed"),
         nl(),
-        "Effective weight: ",
-        Code(f"{old_weight} -> {new_weight}"),
+        "Node Operators:",
+        nl(1),
     ]
-    if new_weight == 0:
+    for index, (operator_label, old_weight, new_weight) in enumerate(entries):
+        if index:
+            parts.append(nl(1))
         parts.extend(
             [
-                nl(),
-                "The Node Operator will no longer receive deposit allocation until weight is restored.",
+                "- ",
+                operator_label,
+                ": ",
+                Code(f"{old_weight} -> {new_weight}"),
             ]
         )
+        if new_weight == 0:
+            parts.extend(
+                [
+                    nl(1),
+                    "  Will no longer receive deposit allocation until weight is restored.",
+                ]
+            )
     return markdown(*parts)
 
 
-def _format_sub_node_operators(sub_node_operators) -> str:
-    if not sub_node_operators:
+def _format_sub_node_operators(
+    allocations: Sequence[OperatorAllocation],
+    operator_labels: Mapping[int, str],
+) -> str:
+    if not allocations:
         return "none"
     return "\n".join(
-        f"- {_operator_label(operator)}"
+        f"- {operator_labels[allocation.node_operator_id]}"
         "\n  Weighted share: "
-        f"{_format_basis_points_percent(read_field(operator, 'weightedShare', 3))} "
-        f"(group share: {_format_basis_points_percent(read_field(operator, 'share', 1))})"
-        for operator in sub_node_operators
+        f"{_format_basis_points_percent(allocation.weighted_share)} "
+        f"(group share: {_format_basis_points_percent(allocation.share)})"
+        for allocation in allocations
     )
 
 
@@ -1131,14 +1152,18 @@ def _operator_group_allocation_lines(operator, prefix: str = "") -> list:
     ]
 
 
-def _operator_group_change_allocation_lines(operator, *, previous: bool = False) -> list:
+def _operator_group_change_allocation_lines(
+    allocation: OperatorAllocation,
+    *,
+    previous: bool = False,
+) -> list:
     prefix = "Previous " if previous else ""
     return [
         f"  {prefix}Share: ",
-        Code(_format_basis_points_percent(read_field(operator, "share", 1))),
+        Code(_format_basis_points_percent(allocation.share)),
         nl(1),
         f"  {prefix}Effective allocation share: ",
-        Code(_format_basis_points_percent(read_field(operator, "weightedShare", 3))),
+        Code(_format_basis_points_percent(allocation.weighted_share)),
     ]
 
 
@@ -1167,7 +1192,12 @@ def _operator_group_name_change_parts(
 
 
 @register_event_message("OperatorGroupCreated")
-def operator_group_created(group_id, sub_node_operators, group_name=None):
+def operator_group_created(
+    group_id,
+    allocations: Sequence[OperatorAllocation],
+    operator_labels: Mapping[int, str],
+    group_name=None,
+):
     return markdown(
         "ℹ️ ",
         Bold("Operator group created"),
@@ -1177,22 +1207,19 @@ def operator_group_created(group_id, sub_node_operators, group_name=None):
         nl(1),
         "Added Node Operators:",
         nl(1),
-        _format_sub_node_operators(sub_node_operators),
+        _format_sub_node_operators(allocations, operator_labels),
     )
 
 
 @register_event_message("OperatorGroupUpdated")
 def operator_group_updated(
     group_id,
-    node_operator_label=None,
-    change_kind=None,
-    old_operator=None,
-    new_operator=None,
+    changes: Sequence[OperatorGroupChange],
     group_name=None,
     old_group_name=None,
     new_group_name=None,
 ):
-    title_prefix = "🚨 " if change_kind == "removed" else "ℹ️ "
+    title_prefix = "🚨 " if any(change.new_allocation is None for change in changes) else "ℹ️ "
     group_name_change_parts = _operator_group_name_change_parts(
         old_group_name=old_group_name,
         new_group_name=new_group_name,
@@ -1212,53 +1239,59 @@ def operator_group_updated(
     ]
     if group_name_change_parts:
         parts.extend(group_name_change_parts)
-        if node_operator_label is not None or change_kind != "renamed":
+        if changes:
             parts.append(nl())
     else:
         parts.append(nl(1))
-    match change_kind:
-        case "renamed":
-            pass
-        case "added":
+    if changes:
+        parts.extend(["Changes:", nl(1)])
+    for index, change in enumerate(changes):
+        if index:
+            parts.append(nl(1))
+        if change.old_allocation is None:
+            assert change.new_allocation is not None
             parts.extend(
                 [
-                    "Changes:",
+                    f"- Added {change.node_operator_label}",
                     nl(1),
-                    f"- Added {node_operator_label}",
-                    nl(1),
-                    *_operator_group_change_allocation_lines(new_operator),
+                    *_operator_group_change_allocation_lines(change.new_allocation),
                 ]
             )
-        case "changed":
+        elif change.new_allocation is None:
             parts.extend(
                 [
-                    "Changes:",
+                    f"- Removed {change.node_operator_label}",
                     nl(1),
-                    f"- Updated {node_operator_label}",
-                    nl(1),
-                    "  Share: ",
-                    Code(
-                        f"{_format_basis_points_percent(read_field(old_operator, 'share', 1))} -> "
-                        f"{_format_basis_points_percent(read_field(new_operator, 'share', 1))}"
-                    ),
-                    nl(1),
-                    "  Effective allocation share: ",
-                    Code(
-                        f"{_format_basis_points_percent(read_field(old_operator, 'weightedShare', 3))} -> "
-                        f"{_format_basis_points_percent(read_field(new_operator, 'weightedShare', 3))}"
+                    *_operator_group_change_allocation_lines(
+                        change.old_allocation,
+                        previous=True,
                     ),
                 ]
             )
-        case "removed":
-            parts.extend(
-                [
-                    "Changes:",
-                    nl(1),
-                    f"- Removed {node_operator_label}",
-                    nl(1),
-                    *_operator_group_change_allocation_lines(old_operator, previous=True),
-                ]
-            )
+        else:
+            parts.append(f"- Updated {change.node_operator_label}")
+            if change.old_allocation.share != change.new_allocation.share:
+                parts.extend(
+                    [
+                        nl(1),
+                        "  Share: ",
+                        Code(
+                            f"{_format_basis_points_percent(change.old_allocation.share)} -> "
+                            f"{_format_basis_points_percent(change.new_allocation.share)}"
+                        ),
+                    ]
+                )
+            if change.old_allocation.weighted_share != change.new_allocation.weighted_share:
+                parts.extend(
+                    [
+                        nl(1),
+                        "  Effective allocation share: ",
+                        Code(
+                            f"{_format_basis_points_percent(change.old_allocation.weighted_share)} -> "
+                            f"{_format_basis_points_percent(change.new_allocation.weighted_share)}"
+                        ),
+                    ]
+                )
     return markdown(*parts)
 
 
@@ -1280,17 +1313,35 @@ def operator_group_cleared(group_id, node_operator_labels, group_name=None):
 
 
 @register_event_message("BondCurveWeightSet")
-def bond_curve_weight_set(curve_id, weight):
-    return markdown(
+def bond_curve_weight_set(
+    entries: Sequence[tuple[int, int, Sequence[str]]],
+):
+    parts: list = [
         "ℹ️ ",
-        Bold("Operator type weight changed"),
+        Bold("Operator type weights changed"),
         nl(),
-        "Type id: ",
-        Code(str(curve_id)),
+        "Changes:",
         nl(1),
-        "New weight: ",
-        Code(str(weight)),
-    )
+    ]
+    for index, (curve_id, weight, operator_labels) in enumerate(entries):
+        if index:
+            parts.append(nl(1))
+        parts.extend(
+            [
+                "- Type id: ",
+                Code(str(curve_id)),
+                nl(1),
+                "  New weight: ",
+                Code(str(weight)),
+                nl(1),
+                "  Node Operators: ",
+            ]
+        )
+        for label_index, operator_label in enumerate(operator_labels):
+            if label_index:
+                parts.append(", ")
+            parts.append(operator_label)
+    return markdown(*parts)
 
 
 @register_event_message("OperatorMetadataSet")

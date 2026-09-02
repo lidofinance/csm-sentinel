@@ -1,9 +1,14 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+import logging
 
 from sentinel.models import Event, EventNotification
-from sentinel.modules.formatting import read_field
+from sentinel.modules.distribution import (
+    DISTRIBUTION_REPORT_EVENTS,
+)
+
+logger = logging.getLogger(__name__)
 
 OPERATOR_GROUP_CREATED = "OperatorGroupCreated"
 OPERATOR_GROUP_UPDATED = "OperatorGroupUpdated"
@@ -23,6 +28,10 @@ class AggregationGroup:
 
 
 class AggregationGroups:
+    DISTRIBUTION_REPORTS = AggregationGroup(
+        name="distribution_reports",
+        window_blocks=1,
+    )
     TOTAL_SIGNING_KEY_COUNTS = AggregationGroup(
         name="total_signing_key_counts",
         window_blocks=1,
@@ -37,6 +46,14 @@ class AggregationGroups:
     )
     OPERATOR_GROUP_CHANGES = AggregationGroup(
         name="operator_group_changes",
+        window_blocks=1,
+    )
+    NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGES = AggregationGroup(
+        name="node_operator_effective_weight_changes",
+        window_blocks=1,
+    )
+    BOND_CURVE_WEIGHT_CHANGES = AggregationGroup(
+        name="bond_curve_weight_changes",
         window_blocks=1,
     )
 
@@ -121,6 +138,86 @@ class NodeOperatorEventAggregator(EventAggregator):
 
 
 @dataclass(frozen=True, slots=True)
+class GlobalEventAggregator(EventAggregator):
+    group: AggregationGroup
+    event_names: frozenset[str]
+
+    def aggregation_key(self, event: Event) -> AggregationKey:
+        return AggregationKey.global_key()
+
+    def window_for(self, event: Event) -> AggregationWindow:
+        return AggregationWindow(
+            group=self.group.name,
+            aggregation_key=self.aggregation_key(event),
+            start_block=event.block,
+            end_block=event.block + self.group.window_blocks - 1,
+            event_names=self.event_names,
+        )
+
+    def aggregate(self, events: Iterable[Event]) -> list[EventNotification]:
+        source_events = tuple(
+            sorted(
+                (event for event in events if event.event in self.event_names),
+                key=lambda event: (event.block, event.transaction_index, event.log_index),
+            )
+        )
+        if not source_events:
+            return []
+        return [EventNotification(source_events=source_events)]
+
+
+@dataclass(frozen=True, slots=True)
+class DistributionReportAggregator(EventAggregator):
+    group: AggregationGroup = AggregationGroups.DISTRIBUTION_REPORTS
+    event_names: frozenset[str] = DISTRIBUTION_REPORT_EVENTS
+
+    def aggregation_key(self, event: Event) -> AggregationKey:
+        return AggregationKey.global_key()
+
+    def window_for(self, event: Event) -> AggregationWindow:
+        return AggregationWindow(
+            group=self.group.name,
+            aggregation_key=self.aggregation_key(event),
+            start_block=event.block,
+            end_block=event.block,
+            event_names=self.event_names,
+        )
+
+    def aggregate(self, events: Iterable[Event]) -> list[EventNotification]:
+        source_events = tuple(
+            sorted(
+                (event for event in events if event.event in self.event_names),
+                key=lambda event: (event.block, event.transaction_index, event.log_index),
+            )
+        )
+        received_event_names = {event.event for event in source_events}
+        missing_event_names = self.event_names - received_event_names
+        if missing_event_names:
+            logger.warning(
+                "Incomplete distribution report aggregation",
+                extra={
+                    "block": source_events[0].block,
+                    "received_event_names": sorted(received_event_names),
+                    "missing_event_names": sorted(missing_event_names),
+                },
+            )
+            return []
+
+        transaction_hashes = {event.tx.to_0x_hex() for event in source_events}
+        if len(transaction_hashes) != 1:
+            logger.warning(
+                "Distribution report events span multiple transactions",
+                extra={
+                    "block": source_events[0].block,
+                    "transaction_hashes": sorted(transaction_hashes),
+                },
+            )
+            return []
+
+        return [EventNotification(source_events=source_events)]
+
+
+@dataclass(frozen=True, slots=True)
 class OperatorGroupChangeAggregator(EventAggregator):
     group: AggregationGroup = AggregationGroups.OPERATOR_GROUP_CHANGES
     event_names: frozenset[str] = frozenset(
@@ -128,8 +225,6 @@ class OperatorGroupChangeAggregator(EventAggregator):
             OPERATOR_GROUP_CREATED,
             OPERATOR_GROUP_UPDATED,
             OPERATOR_GROUP_CLEARED,
-            NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGED,
-            BOND_CURVE_WEIGHT_SET,
         }
     )
 
@@ -150,25 +245,11 @@ class OperatorGroupChangeAggregator(EventAggregator):
             (event for event in events if event.event in self.event_names),
             key=lambda event: (event.block, event.transaction_index, event.log_index),
         )
-        trigger_events = [
-            event for event in relevant_events if event.event in _OPERATOR_GROUP_TRIGGER_EVENTS
-        ]
-        if not trigger_events:
-            return [EventNotification.from_event(event) for event in relevant_events]
-
         notifications: list[EventNotification] = []
-        for group_events in _events_by_group_id(trigger_events).values():
+        for group_events in _events_by_group_id(relevant_events).values():
             notification = self._notification_for_group(group_events)
             if notification is not None:
                 notifications.append(notification)
-
-        consumed_node_operator_ids = _final_group_node_operator_ids(trigger_events)
-        notifications.extend(
-            EventNotification.from_event(event)
-            for event in relevant_events
-            if event.event not in _OPERATOR_GROUP_TRIGGER_EVENTS
-            and not _is_consumed_supporting_event(event, consumed_node_operator_ids)
-        )
         return sorted(
             notifications,
             key=lambda notification: (
@@ -178,7 +259,10 @@ class OperatorGroupChangeAggregator(EventAggregator):
             ),
         )
 
-    def _notification_for_group(self, group_events: list[Event]) -> EventNotification | None:
+    def _notification_for_group(
+        self,
+        group_events: list[Event],
+    ) -> EventNotification | None:
         last_event = group_events[-1]
         if last_event.event == OPERATOR_GROUP_CLEARED:
             return EventNotification(source_events=tuple(group_events))
@@ -216,15 +300,6 @@ def node_operator_aggregators_from_event_handlers(
     )
 
 
-_OPERATOR_GROUP_TRIGGER_EVENTS = frozenset(
-    {
-        OPERATOR_GROUP_CREATED,
-        OPERATOR_GROUP_UPDATED,
-        OPERATOR_GROUP_CLEARED,
-    }
-)
-
-
 def _events_by_group_id(events: Iterable[Event]) -> dict[int, list[Event]]:
     events_by_group_id: dict[int, list[Event]] = {}
     for event in events:
@@ -237,26 +312,6 @@ def _last_group_info_event(events: Iterable[Event]) -> Event | None:
         if event.event in {OPERATOR_GROUP_CREATED, OPERATOR_GROUP_UPDATED}:
             return event
     return None
-
-
-def _final_group_node_operator_ids(events: Iterable[Event]) -> set[int]:
-    node_operator_ids: set[int] = set()
-    for event in events:
-        group_info = event.args.get("groupInfo")
-        if group_info is None:
-            continue
-        for operator in read_field(group_info, "subNodeOperators", 1):
-            node_operator_ids.add(int(read_field(operator, "nodeOperatorId", 0)))
-    return node_operator_ids
-
-
-def _is_consumed_supporting_event(event: Event, node_operator_ids: set[int]) -> bool:
-    node_operator_id = event.args.get("nodeOperatorId")
-    return (
-        event.event == NODE_OPERATOR_EFFECTIVE_WEIGHT_CHANGED
-        and node_operator_id is not None
-        and int(node_operator_id) in node_operator_ids
-    )
 
 
 def _contains_event(events: Iterable[Event], event_name: str) -> bool:

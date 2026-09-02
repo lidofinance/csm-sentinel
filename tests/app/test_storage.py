@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from hexbytes import HexBytes
+import pytest
 
 from sentinel.app.storage import (
     BlockState,
@@ -9,10 +10,13 @@ from sentinel.app.storage import (
     ChatStorage,
     NodeOperatorChats,
     NodeOperatorSubscriptions,
+    RuntimeIdentity,
+    RuntimeIdentityMismatch,
     ensure_int_set,
     normalise_node_operator_ids,
     normalise_node_operator_map,
 )
+from sentinel.module_types import ModuleType
 from sentinel.models import Event
 from sentinel.modules.aggregation import AggregationKey, AggregationWindow
 from sentinel.services.digest import DigestGroups
@@ -79,6 +83,86 @@ def test_normalise_node_operator_ids_logs_on_invalid_iterable(caplog):
     result = normalise_node_operator_ids(1)  # type: ignore[arg-type]
     assert result == set()
     assert "Ignoring malformed node operator list" in caplog.text
+
+
+# BlockState
+
+
+def test_runtime_identity_binds_legacy_storage():
+    bot_data = {"block": 123}
+    identity = RuntimeIdentity(
+        chain_id=1,
+        module_address="0x1234",
+        module_type=ModuleType.COMMUNITY,
+    )
+
+    assert identity.bind(bot_data) is True
+    assert bot_data["runtime_identity"] == {
+        "schema_version": 1,
+        "chain_id": 1,
+        "module_address": "0x1234",
+        "module_type": ModuleType.COMMUNITY.value,
+    }
+
+
+def test_runtime_identity_accepts_matching_storage():
+    identity = RuntimeIdentity(
+        chain_id=1,
+        module_address="0x1234",
+        module_type=ModuleType.COMMUNITY,
+    )
+    bot_data = {"runtime_identity": identity.to_dict(), "block": 123}
+
+    assert identity.bind(bot_data) is False
+    assert bot_data["block"] == 123
+
+
+@pytest.mark.parametrize(
+    "current_identity",
+    [
+        RuntimeIdentity(
+            chain_id=560_048,
+            module_address="0x1234",
+            module_type=ModuleType.COMMUNITY,
+        ),
+        RuntimeIdentity(
+            chain_id=1,
+            module_address="0x5678",
+            module_type=ModuleType.COMMUNITY,
+        ),
+        RuntimeIdentity(
+            chain_id=1,
+            module_address="0x1234",
+            module_type=ModuleType.CURATED,
+        ),
+    ],
+)
+def test_runtime_identity_rejects_storage_from_another_runtime(
+    current_identity: RuntimeIdentity,
+):
+    persisted_identity = RuntimeIdentity(
+        chain_id=1,
+        module_address="0x1234",
+        module_type=ModuleType.COMMUNITY,
+    )
+    bot_data = {"runtime_identity": persisted_identity.to_dict(), "block": 25_600_000}
+
+    with pytest.raises(RuntimeIdentityMismatch, match="does not match configured runtime"):
+        current_identity.bind(bot_data)
+
+    assert bot_data["block"] == 25_600_000
+
+
+def test_runtime_identity_rejects_partial_manifest():
+    identity = RuntimeIdentity(
+        chain_id=1,
+        module_address="0x1234",
+        module_type=ModuleType.COMMUNITY,
+    )
+    bot_data = {"runtime_identity": {"chain_id": 1}}
+
+    with pytest.raises(RuntimeError, match="Persisted runtime identity is malformed"):
+        identity.bind(bot_data)
 
 
 # BlockState

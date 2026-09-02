@@ -1,5 +1,6 @@
 from dataclasses import fields, replace
 
+from hexbytes import HexBytes
 import pytest
 from types import SimpleNamespace
 
@@ -11,8 +12,10 @@ from sentinel.app.contracts import (
 )
 from sentinel.app.module_adapter import build_module_adapter_from_addresses
 from sentinel.chain import SharedChainConnection
+from sentinel.models import Event
 from sentinel.module_types import ModuleType
 from sentinel.modules.base import BaseModuleAdapter
+from sentinel.modules.side_effects import ModuleEventSideEffects
 from sentinel.modules.texts import BotTexts
 from sentinel.modules.community.adapter import (
     CommunityModuleAdapter,
@@ -24,6 +27,7 @@ from sentinel.modules.curated.adapter import (
     CuratedModuleContracts,
 )
 from sentinel.modules.curated.texts import CuratedTexts
+from sentinel.modules.distribution import DISTRIBUTION_REPORT_EVENTS
 
 
 class _FakeEth:
@@ -142,7 +146,11 @@ def test_community_module_adapter_instantiation():
         chain=_dummy_chain(),
     )
     assert result.module_type == ModuleType.COMMUNITY
-    assert result.side_effect_events() == {"NodeOperatorAdded"}
+    assert result.side_effect_events() == {"NodeOperatorAdded", "Resumed"}
+    fee_distributor_source = next(
+        source for source in result.event_sources() if source.name == "fee_distributor"
+    )
+    assert fee_distributor_source.event_names == DISTRIBUTION_REPORT_EVENTS
 
 
 def test_curated_module_adapter_instantiation():
@@ -176,6 +184,10 @@ def test_curated_module_adapter_instantiation():
     assert "KeyAllocatedBalanceChanged" not in result.notifiable_events()
     assert result.catalog_events() == result.notifiable_events()
     assert result.side_effect_events() == {"NodeOperatorAdded", "OperatorMetadataSet"}
+    fee_distributor_source = next(
+        source for source in result.event_sources() if source.name == "fee_distributor"
+    )
+    assert fee_distributor_source.event_names == DISTRIBUTION_REPORT_EVENTS
 
 
 def test_build_curated_module_adapter_uses_curated_module_abi():
@@ -249,13 +261,22 @@ async def test_community_module_adapter_discovers_module_id_after_startup():
         module_ui_url=None,
         chain=_FakeChain(),
     )
-    event = SimpleNamespace(args={"stakingModuleId": 3})
+    vebo_event = SimpleNamespace(args={"stakingModuleId": 3})
+    resumed_event = Event(
+        event="Resumed",
+        args={},
+        block=123,
+        tx=HexBytes("0xdeadbeef"),
+        address=addresses.module,
+        log_index=0,
+        transaction_index=0,
+    )
 
-    assert not adapter.staking_module_id_matches(event)
+    assert not adapter.staking_module_id_matches(vebo_event)
 
-    await adapter.refresh_staking_module_id()
+    await ModuleEventSideEffects(adapter).process_event(resumed_event)
 
-    assert adapter.staking_module_id_matches(event)
+    assert adapter.staking_module_id_matches(vebo_event)
 
 
 def test_adapter_build_event_list_text_filters_catalog_events():

@@ -9,6 +9,30 @@ if TYPE_CHECKING:
     from sentinel.app.context import BotContext
 
 
+def _migrate_chat_subscriptions(
+    context: "BotContext",
+    old_chat_id: int,
+    new_chat_id: int,
+) -> None:
+    application = context.application
+    old_chat_data = application.chat_data.get(old_chat_id)
+    new_chat_data = application.chat_data.get(new_chat_id)
+
+    if old_chat_data is None:
+        return
+    if new_chat_data is None:
+        application.migrate_chat_data(old_chat_id=old_chat_id, new_chat_id=new_chat_id)
+        return
+
+    old_subscriptions = context.chat_storage(chat_data=old_chat_data).node_operators.ids()
+    new_subscriptions = context.chat_storage(chat_data=new_chat_data).node_operators
+    for node_operator_id in old_subscriptions:
+        new_subscriptions.follow(node_operator_id)
+
+    application.drop_chat_data(old_chat_id)
+    application.mark_data_for_update_persistence(chat_ids=new_chat_id)
+
+
 async def chat_migration(update: Update, context: "BotContext") -> None:
     message = update.message
     if message is None:
@@ -28,7 +52,7 @@ async def chat_migration(update: Update, context: "BotContext") -> None:
     if old_chat_id is None or new_chat_id is None:
         return
 
-    context.application.migrate_chat_data(message=message)
+    _migrate_chat_subscriptions(context, old_chat_id, new_chat_id)
 
     # Keep bot-level indexes (chat id sets and node operator target mapping) consistent.
     bot_storage = context.bot_storage
@@ -36,7 +60,7 @@ async def chat_migration(update: Update, context: "BotContext") -> None:
 
     # Ensure node operator mapping contains the new chat id for the migrated per-chat subscriptions.
     new_chat_data = context.application.chat_data.get(new_chat_id)
-    if new_chat_data:
+    if new_chat_data is not None:
         chat_storage = context.chat_storage(chat_data=new_chat_data)
         for node_operator_id in chat_storage.node_operators.ids():
             bot_storage.node_operator_chats.subscribe(node_operator_id, new_chat_id)

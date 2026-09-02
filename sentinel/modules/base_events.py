@@ -7,6 +7,7 @@ from eth_utils import humanize_wei
 from sentinel.models import Event, EventNotification
 from sentinel.modules.distribution import (
     DistributionLogFetcher,
+    distribution_report_rewards,
     parse_distribution_log,
     validator_sort_key,
 )
@@ -58,7 +59,7 @@ class BaseModule(EventMessageEngineBase):
                 int(last_event.args["depositedKeysCount"]),
             )
 
-        footer = await self.digest_footer(event)
+        footer = await self.block_range_footer(event)
 
         def render(node_operator_ids: frozenset[str]) -> tuple[str, ...]:
             entries = [
@@ -140,7 +141,7 @@ class BaseModule(EventMessageEngineBase):
     async def block_footer(self, event: EventNotification) -> str:
         raise NotImplementedError
 
-    async def digest_footer(self, event: EventNotification) -> str:
+    async def block_range_footer(self, event: EventNotification) -> str:
         start_block, end_block = self.notification_block_range(event)
         block_links = [(str(start_block), self.block_link(start_block))]
         if end_block != start_block:
@@ -299,6 +300,9 @@ class BaseModule(EventMessageEngineBase):
         return template(withdrawals) + await self.notification_footer(event)
 
     async def distribution_log_updated(self, event: EventNotification):
+        if distribution_report_rewards(event) == 0:
+            return None
+
         template = self._require_message_template(event.event)
         base_message = template()
         footer = await self.notification_footer(event)
@@ -320,7 +324,10 @@ class BaseModule(EventMessageEngineBase):
         operator_messages: dict[str, str] = {}
         for operator_id, flagged in summary.strikes_per_operator.items():
             flagged_sorted = sorted(flagged, key=lambda item: validator_sort_key(item[0]))
-            operator_messages[str(operator_id)] = f"{template(operator_id, flagged_sorted)}{footer}"
+            operator_label = await self._distribution_operator_label(operator_id, event.block)
+            operator_messages[str(operator_id)] = (
+                f"{template(operator_label, flagged_sorted)}{footer}"
+            )
 
         if not operator_messages:
             if summary.all_operator_ids:
@@ -342,3 +349,7 @@ class BaseModule(EventMessageEngineBase):
             return messages or (fallback_message,)
 
         return NotificationPlan.per_chat(summary.all_operator_ids, render)
+
+    async def _distribution_operator_label(self, operator_id: str, block: int) -> str:
+        _ = block
+        return operator_id

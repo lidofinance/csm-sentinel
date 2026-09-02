@@ -5,6 +5,7 @@ import pytest
 from web3.exceptions import (
     BlockNotFound,
     ContractLogicError,
+    PersistentConnectionClosedOK,
     ProviderConnectionError,
     TooManyRequests,
     Web3RPCError,
@@ -81,6 +82,30 @@ async def test_provider_connects_to_fallback_when_primary_is_unavailable(monkeyp
     assert attempted == [0, 1]
     assert provider.active_endpoint == pool.endpoints[1]
     assert provider.connection_generation == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_closes_disconnected_transport_before_reconnecting(monkeypatch):
+    pool = RpcEndpointPool(("ws://primary.invalid", "ws://fallback.invalid"))
+    provider = _request_provider(pool)
+    primary = pool.endpoints[0]
+    provider.active_endpoint = primary
+    calls: list[str] = []
+
+    async def close_endpoint():
+        calls.append("close")
+
+    async def open_endpoint(endpoint):
+        calls.append(f"open:{endpoint.index}")
+
+    monkeypatch.setattr(provider, "is_connected", AsyncMock(return_value=False))
+    monkeypatch.setattr(provider, "_close_endpoint", close_endpoint)
+    monkeypatch.setattr(provider, "_open_endpoint", open_endpoint)
+
+    await provider.connect()
+
+    assert calls == ["close", "open:0"]
+    assert provider.active_endpoint == primary
 
 
 @pytest.mark.asyncio
@@ -508,19 +533,90 @@ async def test_subscription_listener_normalizes_raw_rpc_error():
         rpc_response={"error": {"code": -32000, "message": "internal error"}},
     )
 
-    async def fail_listener():
-        raise error
-
-    listener_task = asyncio.create_task(fail_listener())
-    await asyncio.wait({listener_task})
-    provider._message_listener_task = listener_task  # noqa: SLF001
+    provider._provider_specific_socket_reader = AsyncMock(side_effect=error)  # noqa: SLF001
 
     with pytest.raises(RpcSubscriptionReconnectRequired) as raised:
-        provider._handle_listener_task_exceptions()  # noqa: SLF001
+        await provider._message_listener()  # noqa: SLF001
 
     assert raised.value.__cause__ is None
     assert raised.value.failure.rpc_code == -32000
     assert not hasattr(raised.value.failure, "exception")
+
+
+@pytest.mark.asyncio
+async def test_subscription_listener_rpc_rejection_cools_down_endpoint():
+    pool = RpcEndpointPool(
+        ("ws://primary.invalid", "ws://fallback.invalid"),
+        cooldown_seconds=60,
+    )
+    provider = _provider(pool, role="subscription")
+    primary = pool.endpoints[0]
+    provider._listener_endpoint = primary  # noqa: SLF001
+    await pool.mark_success(primary)
+    provider._provider_specific_socket_reader = AsyncMock(  # noqa: SLF001
+        side_effect=Web3RPCError(
+            message="capacity exceeded",
+            rpc_response={"error": {"code": -32005, "message": "capacity exceeded"}},
+        )
+    )
+
+    with pytest.raises(RpcSubscriptionReconnectRequired):
+        await provider._message_listener()  # noqa: SLF001
+
+    candidates, _ = await pool.candidates()
+    assert candidates == (pool.endpoints[1],)
+
+
+@pytest.mark.asyncio
+async def test_repeated_subscription_listener_failure_cools_down_endpoint(monkeypatch):
+    pool = RpcEndpointPool(
+        ("ws://primary.invalid", "ws://fallback.invalid"),
+        cooldown_seconds=60,
+    )
+    provider = _provider(pool, role="subscription")
+    primary = pool.endpoints[0]
+    close_endpoint = AsyncMock()
+    monkeypatch.setattr(provider, "_close_endpoint", close_endpoint)
+
+    for expected_candidates in ((primary, pool.endpoints[1]), (pool.endpoints[1],)):
+        provider.active_endpoint = None
+        provider._listener_endpoint = primary  # noqa: SLF001
+        await pool.mark_success(primary)
+
+        provider._provider_specific_socket_reader = AsyncMock(  # noqa: SLF001
+            side_effect=ProviderConnectionError("listener disconnected")
+        )
+
+        with pytest.raises(RpcSubscriptionReconnectRequired) as raised:
+            await provider._message_listener()  # noqa: SLF001
+
+        assert raised.value.failure.endpoint_index == primary.index
+        candidates, _ = await pool.candidates()
+        assert candidates == expected_candidates
+
+    close_endpoint.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_repeated_clean_subscription_listener_close_cools_down_endpoint():
+    pool = RpcEndpointPool(
+        ("ws://primary.invalid", "ws://fallback.invalid"),
+        cooldown_seconds=60,
+    )
+    provider = _provider(pool, role="subscription")
+    primary = pool.endpoints[0]
+
+    for expected_candidates in ((primary, pool.endpoints[1]), (pool.endpoints[1],)):
+        provider._listener_endpoint = primary  # noqa: SLF001
+        await pool.mark_success(primary)
+        provider._provider_specific_socket_reader = AsyncMock(  # noqa: SLF001
+            side_effect=PersistentConnectionClosedOK(user_message="clean close")
+        )
+
+        await provider._message_listener()  # noqa: SLF001
+
+        candidates, _ = await pool.candidates()
+        assert candidates == expected_candidates
 
 
 @pytest.mark.asyncio
@@ -531,15 +627,10 @@ async def test_subscription_listener_preserves_semantic_error():
     )
     error = BlockNotFound("missing block")
 
-    async def fail_listener():
-        raise error
-
-    listener_task = asyncio.create_task(fail_listener())
-    await asyncio.wait({listener_task})
-    provider._message_listener_task = listener_task  # noqa: SLF001
+    provider._provider_specific_socket_reader = AsyncMock(side_effect=error)  # noqa: SLF001
 
     with pytest.raises(BlockNotFound) as raised:
-        provider._handle_listener_task_exceptions()  # noqa: SLF001
+        await provider._message_listener()  # noqa: SLF001
 
     assert raised.value is error
 

@@ -27,6 +27,7 @@ from sentinel.handlers.state import Callback, States
 
 def build_conversation_handler() -> ConversationHandler:
     text_without_commands = filters.TEXT & ~filters.COMMAND
+    broadcast_message = filters.ALL & ~filters.COMMAND
     return ConversationHandler(
         entry_points=[CommandHandler("start", start.start)],
         states={
@@ -99,9 +100,9 @@ def build_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(broadcast_menu, pattern="^" + Callback.BACK.value + "$"),
                 CallbackQueryHandler(
                     broadcast_all_confirm,
-                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_ALL.value + "$",
+                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_ALL.value + r":\d+$",
                 ),
-                MessageHandler(text_without_commands, broadcast_all_message),
+                MessageHandler(broadcast_message, broadcast_all_message),
             ],
             States.ADMIN_BROADCAST_SELECT_NO: [
                 CallbackQueryHandler(broadcast_menu, pattern="^" + Callback.BACK.value + "$"),
@@ -111,9 +112,9 @@ def build_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(broadcast_by_no, pattern="^" + Callback.BACK.value + "$"),
                 CallbackQueryHandler(
                     broadcast_selected_confirm,
-                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_SELECTED.value + "$",
+                    pattern="^" + Callback.ADMIN_BROADCAST_CONFIRM_SELECTED.value + r":\d+$",
                 ),
-                MessageHandler(text_without_commands, broadcast_selected_message),
+                MessageHandler(broadcast_message, broadcast_selected_message),
             ],
         },
         fallbacks=[CommandHandler("start", start.start)],
